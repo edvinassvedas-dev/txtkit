@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>quote &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">Input</span><span class="count" id="inCount">0 items</span></div>
+    <textarea id="input" placeholder="paste list here"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Output</span><span class="count" id="outCount">0 items</span></div>
+    <textarea id="output" readonly placeholder="result"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Quote characters <span class="hint">click a preset or type your own</span></span>
+      <div class="qpresets" id="qpresets"></div>
+      <div class="qrow">
+        <div><div class="lab">Left</div><input type="text" id="lq" value="'" maxlength="6"></div>
+        <div><div class="lab">Right</div><input type="text" id="rq" value="'" maxlength="6"></div>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Behaviour</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="skipEmpty" checked>
+          <span>Remove empty items<small>skip lines that contain only whitespace</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="skipQuoted" checked>
+          <span>Don't double-quote<small>leave items already wrapped in the chosen quotes alone</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="trimItems" checked>
+          <span>Trim whitespace<small>strip spaces around each item before quoting</small></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Input separator <span class="hint">how items are split</span></span>
+      <div class="sep-row">
+        <select id="inSepKind">
+          <option value="newline" selected>newline</option>
+          <option value="comma">comma</option>
+          <option value="comma-space">, (with space)</option>
+          <option value="semicolon">semicolon</option>
+          <option value="space">whitespace</option>
+          <option value="tab">tab</option>
+          <option value="pipe">pipe |</option>
+          <option value="custom">custom</option>
+          <option value="regex" title="complex patterns may freeze the tab">regex</option>
+        </select>
+        <input type="text" id="inSepCustom" placeholder="custom or /regex/" disabled>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Output separator <span class="hint">how items are joined</span></span>
+      <div class="sep-row">
+        <select id="outSepKind">
+          <option value="newline">newline</option>
+          <option value="comma">comma</option>
+          <option value="comma-space" selected>, (with space)</option>
+          <option value="semicolon">semicolon</option>
+          <option value="space">space</option>
+          <option value="tab">tab</option>
+          <option value="pipe">pipe |</option>
+          <option value="custom">custom</option>
+        </select>
+        <input type="text" id="outSepCustom" placeholder="custom" disabled>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output');
+  const lq = $('lq'), rq = $('rq');
+  const skipEmpty = $('skipEmpty'), skipQuoted = $('skipQuoted'), trimItems = $('trimItems');
+  const inSepKind = $('inSepKind'), inSepCustom = $('inSepCustom');
+  const outSepKind = $('outSepKind'), outSepCustom = $('outSepCustom');
+  const inCount = $('inCount'), outCount = $('outCount');
+
+  buildQuotePresets($('qpresets'), lq, rq, () => { update(); syncHash(); });
+  setupCopyButton($('copyOut'), output);
+
+  // ---- URL hash state config ----
+  function syncHash() {
+    writeHashParams({
+      l:  lq.value !== "'" ? lq.value : '',
+      r:  rq.value !== "'" ? rq.value : '',
+      is: inSepKind.value !== 'newline'     ? inSepKind.value  : '',
+      ic: inSepCustom.value || '',
+      os: outSepKind.value !== 'comma-space'? outSepKind.value : '',
+      oc: outSepCustom.value || '',
+      se: skipEmpty.checked  ? '' : '0',
+      sq: skipQuoted.checked ? '' : '0',
+      t:  trimItems.checked  ? '' : '0',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (p.has('l'))  lq.value = p.get('l');
+    if (p.has('r'))  rq.value = p.get('r');
+    if (p.has('is')) inSepKind.value = p.get('is');
+    if (p.has('ic')) inSepCustom.value = p.get('ic');
+    if (p.has('os')) outSepKind.value = p.get('os');
+    if (p.has('oc')) outSepCustom.value = p.get('oc');
+    if (p.get('se') === '0') skipEmpty.checked  = false;
+    if (p.get('sq') === '0') skipQuoted.checked = false;
+    if (p.get('t')  === '0') trimItems.checked  = false;
+    syncSeparatorDisabled(inSepKind, inSepCustom, true);
+    syncSeparatorDisabled(outSepKind, outSepCustom, false);
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  function update(){
+    let items = splitItems(input.value, inSepKind.value, inSepCustom.value);
+    const rawCount = items.length;
+
+    items = processList(items, { trim: trimItems.checked, skipEmpty: skipEmpty.checked });
+
+    const L = lq.value, R = rq.value;
+    const wrapped = items.map(s => {
+      if (skipQuoted.checked && L && R &&
+          s.startsWith(L) && s.endsWith(R) &&
+          s.length >= L.length + R.length) return s;
+      return L + s + R;
+    });
+
+    output.value = joinItems(wrapped, outSepKind.value, outSepCustom.value);
+    inCount.textContent = pluralLabel(input.value.length ? rawCount : 0);
+    outCount.textContent = pluralLabel(wrapped.length);
+    highlightActivePreset($('qpresets'), L, R);
+  }
+
+  ['input','change'].forEach(ev => {
+    input.addEventListener(ev, () => { debouncedUpdate(); debouncedSync(); });
+    [lq, rq, inSepCustom, outSepCustom].forEach(el => el.addEventListener(ev, () => { update(); debouncedSync(); }));
+    [skipEmpty, skipQuoted, trimItems, inSepKind, outSepKind].forEach(el => el.addEventListener(ev, () => {
+      syncSeparatorDisabled(inSepKind, inSepCustom, true);
+      syncSeparatorDisabled(outSepKind, outSepCustom, false);
+      update();
+      debouncedSync();
+    }));
+  });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    lq.value = "'"; rq.value = "'";
+    skipEmpty.checked = true; skipQuoted.checked = true; trimItems.checked = true;
+    inSepKind.value = 'newline'; outSepKind.value = 'comma-space';
+    inSepCustom.value = ''; outSepCustom.value = '';
+    inSepCustom.disabled = true; outSepCustom.disabled = true;
+    update();
+    syncHash();
+  });
+
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>
