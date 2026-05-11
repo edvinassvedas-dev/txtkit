@@ -11,6 +11,8 @@ const TOOLS = [
     description: 'Strip surrounding quotes or brackets from list items' },
   { file: 'compare.html', label: 'compare',
     description: 'Find items in list A only, list B only, or in both' },
+  { file: 'dedupe.html', label: 'dedupe',
+    description: 'Find duplicates and produce a deduplicated list' },
 ];
 
 // ---------- Theme toggle----------

@@ -11,6 +11,7 @@ Plain web tools for dealing with text
 - **quote** — wrap list items in quote characters
 - **unquote** — strip surrounding quotes or brackets
 - **compare** — items in list A only, B only, or both
+- **dedupe** — find duplicates and produce a deduplicated list
 
 ## License
 
