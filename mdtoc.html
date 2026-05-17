@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>mdtoc &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">Markdown</span><span class="count" id="inCount">0 headings</span></div>
+    <textarea id="input" placeholder="paste a markdown document"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Table of contents</span><span class="count" id="outCount">0 entries</span></div>
+    <textarea id="output" readonly placeholder="generated TOC"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Min level <span class="hint">shallowest heading to include</span></span>
+      <div class="sep-row">
+        <select id="minLevel">
+          <option value="1">1 (#)</option>
+          <option value="2" selected>2 (##)</option>
+          <option value="3">3 (###)</option>
+          <option value="4">4 (####)</option>
+          <option value="5">5 (#####)</option>
+          <option value="6">6 (######)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Max level <span class="hint">deepest heading to include</span></span>
+      <div class="sep-row">
+        <select id="maxLevel">
+          <option value="1">1 (#)</option>
+          <option value="2">2 (##)</option>
+          <option value="3" selected>3 (###)</option>
+          <option value="4">4 (####)</option>
+          <option value="5">5 (#####)</option>
+          <option value="6">6 (######)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">List style <span class="hint">marker for each entry</span></span>
+      <div class="sep-row">
+        <select id="listStyle">
+          <option value="none" selected>none (plaintext, not a md list)</option>
+          <option value="dash">- bullet</option>
+          <option value="star">* bullet</option>
+          <option value="number">1. numbered</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Indent <span class="hint">per nesting level</span></span>
+      <div class="sep-row">
+        <select id="indent">
+          <option value="2" selected>2 spaces</option>
+          <option value="4">4 spaces</option>
+          <option value="tab">tab</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell full">
+      <span class="opt-label">Behaviour</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="linked" checked>
+          <span>Link to anchors<small>output [Heading](#slug) instead of plain text; uses GitHub-style slugs</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="flatten">
+          <span>Flatten<small>no indentation; one flat list regardless of heading depth</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="hardBreak">
+          <span>Hard line breaks<small>append two spaces per line so each entry stays on its own line when rendered as markdown (useful when headings are already numbered and no list marker is wanted)</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="box preview-box">
+  <div class="box-head">
+    <span class="label">Structure preview</span>
+    <span class="count">read-only &middot; mirrors output structure</span>
+  </div>
+  <textarea id="preview" readonly placeholder="structural preview of the table of contents"></textarea>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output'), preview = $('preview');
+  const minLevel = $('minLevel'), maxLevel = $('maxLevel');
+  const listStyle = $('listStyle'), indent = $('indent');
+  const linked = $('linked'), flatten = $('flatten'), hardBreak = $('hardBreak');
+  const inCount = $('inCount'), outCount = $('outCount');
+
+  setupCopyButton($('copyOut'), output);
+
+  // ---------- heading extraction ----------
+
+  function extractHeadings(text) {
+    const lines = text.split(/\r?\n/);
+    const out = [];
+    let fence = null;  // current fence marker char, or null
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const fm = line.match(/^(\s{0,3})(`{3,}|~{3,})/);
+      if (fm) {
+        const marker = fm[2][0];
+        if (fence === null) { fence = marker; continue; }
+        if (fence === marker) { fence = null; continue; }
+        continue;
+      }
+      if (fence !== null) continue;  // inside a code block
+
+      const atx = line.match(/^(\s{0,3})(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (atx) {
+        const lvl = atx[2].length;
+        const t = atx[3].trim();
+        if (t) out.push({ level: lvl, text: t });
+        continue;
+      }
+
+      const next = lines[i + 1];
+      if (next !== undefined && line.trim() &&
+          !/^\s{0,3}#{1,6}\s/.test(line)) {
+        if (/^\s{0,3}=+\s*$/.test(next)) {
+          out.push({ level: 1, text: line.trim() });
+          i++; continue;
+        }
+        if (/^\s{0,3}-+\s*$/.test(next) && line.trim().length) {
+          // a line of only dashes after text is an h2 underline,
+          // but a single "-" could be a list; require 2+ dashes
+          if (/^\s{0,3}-{2,}\s*$/.test(next)) {
+            out.push({ level: 2, text: line.trim() });
+            i++; continue;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+//---
+  function makeSlugger() {
+    const seen = new Map();
+    return function slug(text) {
+      let s = text.toLowerCase()
+        // strip anything that is not a letter, number, space, or hyphen
+        .replace(/[^\p{L}\p{N}\s-]/gu, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      if (seen.has(s)) {
+        const n = seen.get(s) + 1;
+        seen.set(s, n);
+        return s + '-' + n;
+      }
+      seen.set(s, 0);
+      return s;
+    };
+  }
+
+  // ---------- ASCII tree prefixes ----------
+  function buildTreePrefixes(filtered) {
+    const n = filtered.length;
+    const depth = new Array(n);
+    const stack = [];  
+    for (let i = 0; i < n; i++) {
+      const lvl = filtered[i].level;
+      while (stack.length && stack[stack.length - 1] >= lvl) stack.pop();
+      depth[i] = stack.length;
+      stack.push(lvl);
+    }
+   
+    function hasLaterSiblingAt(idx, d) {
+      for (let j = idx + 1; j < n; j++) {
+        if (depth[j] < d) return false;
+        if (depth[j] === d) return true;
+      }
+      return false;
+    }
+    const prefixes = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const d = depth[i];
+      if (d === 0) { prefixes[i] = ''; continue; }  
+      let p = '';
+      for (let a = 1; a < d; a++) {
+        p += hasLaterSiblingAt(i, a) ? '\u2502  ' : '   ';
+      }
+      p += hasLaterSiblingAt(i, d) ? '\u251C\u2500 ' : '\u2514\u2500 ';
+      prefixes[i] = p;
+    }
+    return prefixes;
+  }
+
+  // ---------- URL hash state ----------
+  function syncHash() {
+    writeHashParams({
+      mn: minLevel.value !== '2' ? minLevel.value : '',
+      mx: maxLevel.value !== '3' ? maxLevel.value : '',
+      ls: listStyle.value !== 'none' ? listStyle.value : '',
+      in: indent.value !== '2' ? indent.value : '',
+      lk: linked.checked  ? '' : '0',
+      fl: flatten.checked ? '1' : '',
+      hb: hardBreak.checked ? '1' : '',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (p.has('mn')) minLevel.value  = p.get('mn');
+    if (p.has('mx')) maxLevel.value  = p.get('mx');
+    if (p.has('ls')) listStyle.value = p.get('ls');
+    if (p.has('in')) indent.value    = p.get('in');
+    if (p.get('lk') === '0') linked.checked = false;
+    if (p.get('fl') === '1') flatten.checked = true;
+    if (p.get('hb') === '1') hardBreak.checked = true;
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  // ---------- main pipeline ----------
+  function update(){
+    const all = extractHeadings(input.value);
+    inCount.textContent = all.length + ' heading' + (all.length === 1 ? '' : 's');
+
+    const mn = parseInt(minLevel.value, 10);
+    const mx = parseInt(maxLevel.value, 10);
+    const filtered = all.filter(h => h.level >= mn && h.level <= mx);
+
+    const slug = makeSlugger();           
+    const slugs = new Map();              
+    all.forEach(h => { slugs.set(h, slug(h.text)); });
+
+    const indentUnit = indent.value === 'tab' ? '\t'
+                     : indent.value === '4'   ? '    '
+                     : '  ';
+
+    const lines = filtered.map((h, idx) => {
+      const depth = flatten.checked ? 0 : (h.level - mn);
+      const pad = indentUnit.repeat(Math.max(0, depth));
+      const marker = listStyle.value === 'number' ? '1.'
+                   : listStyle.value === 'star'   ? '*'
+                   : listStyle.value === 'none'   ? ''
+                   : '-';
+      const label = linked.checked
+        ? '[' + h.text.replace(/]/g, '\\]') + '](#' + slugs.get(h) + ')'
+        : h.text;
+      return pad + (marker ? marker + ' ' : '') + label;
+    });
+
+    const joiner = hardBreak.checked ? '  \n' : '\n';
+    output.value = lines.join(joiner);
+    outCount.textContent = lines.length + ' entr' + (lines.length === 1 ? 'y' : 'ies');
+
+    // ---- preview: shows how the TOC will render... ---
+    
+    const names = filtered.map(h => h.text);
+    let previewText;
+    if (listStyle.value === 'none') {
+
+
+      previewText = names.join(hardBreak.checked ? '\n' : ' ');
+    } else if (flatten.checked) {
+      // flattened list
+      previewText = names.join('\n');
+    } else {
+      // nested list
+      const tp = buildTreePrefixes(filtered);
+      previewText = filtered.map((h, i) => tp[i] + h.text).join('\n');
+    }
+    preview.value = previewText;
+  }
+
+  ['input','change'].forEach(ev => {
+    input.addEventListener(ev, () => { debouncedUpdate(); debouncedSync(); });
+    [minLevel, maxLevel, listStyle, indent, linked, flatten, hardBreak].forEach(el =>
+      el.addEventListener(ev, () => { update(); debouncedSync(); }));
+  });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    minLevel.value = '2'; maxLevel.value = '3';
+    listStyle.value = 'none'; indent.value = '2';
+    linked.checked = true; flatten.checked = false; hardBreak.checked = false;
+    update();
+    syncHash();
+  });
+
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>

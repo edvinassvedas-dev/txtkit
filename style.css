@@ -145,6 +145,8 @@ body {
 }
 .box.box-sm { min-height: 300px; }
 .box.box-sm textarea { min-height: 80px; }
+.box.preview-box{min-height:0;margin-bottom:12px;}
+.box.preview-box textarea{min-height:clamp(120px,30vh,320px);}
 .box-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 6px 10px;

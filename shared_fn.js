@@ -15,6 +15,8 @@ const TOOLS = [
     description: 'Find duplicates and produce a deduplicated list' },
   { file: 'tabulate.html', label: 'tabulate',
     description: 'Turn tabular text into MD, CSV, PY, or SQL' },
+  { file: 'mdtoc.html', label: 'mdtoc',
+    description: 'Generate a table of contents from markdown headings' },
 ];
 
 // ---------- Theme toggle----------
