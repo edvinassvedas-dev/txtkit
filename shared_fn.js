@@ -13,6 +13,8 @@ const TOOLS = [
     description: 'Find items in list A only, list B only, or in both' },
   { file: 'dedupe.html', label: 'dedupe',
     description: 'Find duplicates and produce a deduplicated list' },
+  { file: 'tabulate.html', label: 'tabulate',
+    description: 'Turn tabular text into MD, CSV, PY, or SQL' },
 ];
 
 // ---------- Theme toggle----------

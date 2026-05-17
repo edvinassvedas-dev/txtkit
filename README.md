@@ -12,6 +12,7 @@ Plain web tools for dealing with text
 - **unquote** — strip surrounding quotes or brackets
 - **compare** — items in list A only, B only, or both
 - **dedupe** — find duplicates and produce a deduplicated list
+- **tabulate** — turn tabular text into Markdown, CSV, Python, or SQL
 
 ## License
 

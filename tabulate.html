@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>tabulate &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">Input</span><span class="count" id="inCount">0 rows</span></div>
+    <textarea id="input" placeholder="paste tabular text (CSV, TSV, or pipe-separated)"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Output</span><span class="count" id="outCount">0 rows</span></div>
+    <textarea id="output" readonly placeholder="formatted table"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Input format <span class="hint">how cells are separated</span></span>
+      <div class="sep-row">
+        <select id="inFmt">
+          <option value="auto" selected>auto-detect</option>
+          <option value="csv">CSV (comma)</option>
+          <option value="tsv">TSV (tab)</option>
+          <option value="pipe">pipe |</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Output format <span class="hint">target table style</span></span>
+      <div class="sep-row">
+        <select id="outFmt">
+          <option value="markdown" selected>markdown</option>
+          <option value="ascii">ASCII (boxed)</option>
+          <option value="aligned">aligned (no borders)</option>
+          <option value="csv">CSV</option>
+          <option value="tsv">TSV</option>
+          <option value="python">Python (list of dicts)</option>
+          <option value="sql">SQL (INSERT VALUES)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">SQL table name <span class="hint">used by SQL output only</span></span>
+      <div class="sep-row">
+        <input type="text" id="sqlTable" value="my_table" placeholder="table name">
+      </div>
+    </div>
+
+    <div class="opt-cell full">
+      <span class="opt-label">Behaviour</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="hasHeader" checked>
+          <span>First row is header<small>treat the first row as column names</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="trimCells" checked>
+          <span>Trim cell whitespace<small>strip leading/trailing spaces from each cell</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output');
+  const inFmt = $('inFmt'), outFmt = $('outFmt');
+  const hasHeader = $('hasHeader'), trimCells = $('trimCells');
+  const sqlTable = $('sqlTable');
+  const inCount = $('inCount'), outCount = $('outCount');
+
+  setupCopyButton($('copyOut'), output);
+
+  // ---------- input parsing ----------
+
+  // Detect the most likely delimiter by scoring tab/comma/pipe presence. -- Tabs win whenever present, otherwise the delimiter with the most consistent count per row wins.
+  
+  function detectFormat(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.length > 0);
+    if (lines.length === 0) return 'csv';
+    const sample = lines.slice(0, 10);
+    if (sample.some(l => l.includes('\t'))) return 'tsv';
+
+    const score = (delim) => {
+      const counts = sample.map(l => (l.match(new RegExp(delim === '|' ? '\\|' : delim, 'g')) || []).length);
+      const max = Math.max(...counts);
+      if (max === 0) return -1;
+      // reward consistency: rows that match the modal count
+      const consistent = counts.filter(c => c === max).length;
+      return consistent * max;
+    };
+    const csv = score(',');
+    const pipe = score('|');
+    return pipe > csv ? 'pipe' : 'csv';
+  }
+
+  function delimiterFor(fmt) {
+    if (fmt === 'tsv')  return '\t';
+    if (fmt === 'pipe') return '|';
+    return ',';
+  }
+
+  // Parse one delimited line into cells.
+  // For csv/tsv -- handles "quoted fields",
+  function parseLine(line, delim, quoted) {
+    if (!quoted) return line.split(delim);
+    const cells = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++; }   // escaped quote
+          else inQuotes = false;
+        } else {
+          cur += ch;
+        }
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === delim) {
+        cells.push(cur); cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    cells.push(cur);
+    return cells;
+  }
+
+  function parseRows(text, fmt) {
+    if (!text) return [];
+    const delim = delimiterFor(fmt);
+    const lines = text.split(/\r?\n/);
+    // drop trailing empty line if present (common from copy-paste)
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    const quoted = (fmt === 'csv' || fmt === 'tsv');
+    return lines.map(line => {
+      let cells = parseLine(line, delim, quoted);
+      // for pipe-separated tables that look like markdown (`| a | b |`),
+      // strip the leading/trailing empty cells produced by the bookend pipes
+      if (fmt === 'pipe') {
+        if (cells.length && cells[0].trim() === '') cells.shift();
+        if (cells.length && cells[cells.length - 1].trim() === '') cells.pop();
+      }
+      return cells;
+    });
+  }
+
+  // strip a markdown separator row like "| --- | --- |" if present as row index 1
+  function stripMarkdownSeparator(rows) {
+    if (rows.length < 2) return rows;
+    const r = rows[1];
+    if (r.every(c => /^\s*:?-+:?\s*$/.test(c))) {
+      return [rows[0], ...rows.slice(2)];
+    }
+    return rows;
+  }
+
+  // normalise: trim cells, ensure all rows have the same column count
+  function normalise(rows, doTrim) {
+    if (!rows.length) return rows;
+    if (doTrim) rows = rows.map(r => r.map(c => c.trim()));
+    const cols = Math.max(...rows.map(r => r.length));
+    return rows.map(r => {
+      const copy = r.slice();
+      while (copy.length < cols) copy.push('');
+      return copy;
+    });
+  }
+
+  // ---------- output formatting ---------
+
+  function colWidths(rows) {
+    if (!rows.length) return [];
+    const cols = rows[0].length;
+    const widths = new Array(cols).fill(0);
+    for (const r of rows) {
+      for (let i = 0; i < cols; i++) {
+        if (r[i].length > widths[i]) widths[i] = r[i].length;
+      }
+    }
+    return widths;
+  }
+
+  function pad(str, width) {
+    return str + ' '.repeat(Math.max(0, width - str.length));
+  }
+
+  function formatMarkdown(rows, hasHeaderRow) {
+    if (!rows.length) return '';
+    const widths = colWidths(rows);
+    const fmtRow = r => '| ' + r.map((c, i) => pad(c, widths[i])).join(' | ') + ' |';
+    const sep    = '| ' + widths.map(w => '-'.repeat(Math.max(3, w))).join(' | ') + ' |';
+    if (hasHeaderRow) {
+      return [fmtRow(rows[0]), sep, ...rows.slice(1).map(fmtRow)].join('\n');
+    }
+    // synthesise a blank header
+    const blank = new Array(rows[0].length).fill('');
+    return [fmtRow(blank), sep, ...rows.map(fmtRow)].join('\n');
+  }
+
+  function formatAscii(rows, hasHeaderRow) {
+    if (!rows.length) return '';
+    const widths = colWidths(rows);
+    const fmtRow = r => '| ' + r.map((c, i) => pad(c, widths[i])).join(' | ') + ' |';
+    const sep    = '+-' + widths.map(w => '-'.repeat(w)).join('-+-') + '-+';
+    const lines = [sep];
+    if (hasHeaderRow && rows.length) {
+      lines.push(fmtRow(rows[0]), sep);
+      for (const r of rows.slice(1)) lines.push(fmtRow(r));
+    } else {
+      for (const r of rows) lines.push(fmtRow(r));
+    }
+    lines.push(sep);
+    return lines.join('\n');
+  }
+
+  function formatAligned(rows, hasHeaderRow) {
+    if (!rows.length) return '';
+    const widths = colWidths(rows);
+    const fmtRow = r => r.map((c, i) => pad(c, widths[i])).join('  ').replace(/\s+$/, '');
+    if (hasHeaderRow && rows.length) {
+      const sep = widths.map(w => '-'.repeat(w)).join('  ');
+      return [fmtRow(rows[0]), sep, ...rows.slice(1).map(fmtRow)].join('\n');
+    }
+    return rows.map(fmtRow).join('\n');
+  }
+
+  // ---------- data output formats ----------
+
+  // CSV cell: quote if it contains the delimiter, a quote or a newline
+  function csvCell(s, delim) {
+    if (s.includes(delim) || s.includes('"') || s.includes('\n')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  function formatDelimited(rows, delim) {
+    return rows.map(r => r.map(c => csvCell(c, delim)).join(delim)).join('\n');
+  }
+
+  // Infer whether a cell should be emitted as a bare literal (number / bool /null) or a quoted string. -- Conservative: only unquote unambiguous numbers,true/false, and empty -> null.
+  function inferLiteral(s, lang) {
+    const t = s.trim();
+    if (t === '') return lang === 'sql' ? 'NULL' : 'None';
+    if (/^-?\d+$/.test(t)) return t;                       // integer
+    if (/^-?\d*\.\d+$/.test(t)) return t;                  // decimal
+    if (/^(true|false)$/i.test(t)) {
+      const b = t.toLowerCase();
+      return lang === 'python' ? (b === 'true' ? 'True' : 'False') : b;
+    }
+    return null;  //  treat as string
+  }
+
+  function pyValue(s) {
+    const lit = inferLiteral(s, 'python');
+    if (lit !== null) return lit;
+    return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+  }
+
+  function sqlValue(s) {
+    const lit = inferLiteral(s, 'sql');
+    if (lit !== null) return lit;
+    return "'" + s.replace(/'/g, "''") + "'";
+  }
+
+  function formatPython(rows, hasHeaderRow) {
+    if (!rows.length) return '';
+    const cols = hasHeaderRow ? rows[0] : rows[0].map((_, i) => 'col' + (i + 1));
+    const dataRows = hasHeaderRow ? rows.slice(1) : rows;
+    if (!dataRows.length) return '[]';
+    const objs = dataRows.map(r => {
+      const pairs = cols.map((c, i) =>
+        "'" + c.replace(/'/g, "\\'") + "': " + pyValue(r[i] !== undefined ? r[i] : ''));
+      return '    {' + pairs.join(', ') + '}';
+    });
+    return '[\n' + objs.join(',\n') + '\n]';
+  }
+
+  function formatSql(rows, hasHeaderRow, table) {
+    if (!rows.length) return '';
+    const cols = hasHeaderRow ? rows[0] : rows[0].map((_, i) => 'col' + (i + 1));
+    const dataRows = hasHeaderRow ? rows.slice(1) : rows;
+    if (!dataRows.length) return '';
+    const tbl = (table || 'my_table').trim() || 'my_table';
+    const colList = cols.map(c => c.trim()).join(', ');
+    const valueRows = dataRows.map(r =>
+      '  (' + cols.map((_, i) => sqlValue(r[i] !== undefined ? r[i] : '')).join(', ') + ')'
+    );
+    return 'INSERT INTO ' + tbl + ' (' + colList + ') VALUES\n' +
+           valueRows.join(',\n') + ';';
+  }
+
+  // ---------- URL hash state -------
+  function syncHash() {
+    writeHashParams({
+      i:  inFmt.value !== 'auto'     ? inFmt.value  : '',
+      o:  outFmt.value !== 'markdown'? outFmt.value : '',
+      h:  hasHeader.checked  ? '' : '0',
+      t:  trimCells.checked  ? '' : '0',
+      st: sqlTable.value !== 'my_table' ? sqlTable.value : '',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (p.has('i')) inFmt.value  = p.get('i');
+    if (p.has('o')) outFmt.value = p.get('o');
+    if (p.get('h') === '0') hasHeader.checked = false;
+    if (p.get('t') === '0') trimCells.checked = false;
+    if (p.has('st')) sqlTable.value = p.get('st');
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  // ---------- main pipeline ----------
+  function update(){
+    const text = input.value;
+    let fmt = inFmt.value === 'auto' ? detectFormat(text) : inFmt.value;
+
+    let rows = parseRows(text, fmt);
+    // if input originally md and the user pasted it back, drop the separator row
+    if (fmt === 'pipe') rows = stripMarkdownSeparator(rows);
+    rows = normalise(rows, trimCells.checked);
+
+    let result = '';
+    if (rows.length) {
+      switch (outFmt.value) {
+        case 'ascii':   result = formatAscii(rows, hasHeader.checked);   break;
+        case 'aligned': result = formatAligned(rows, hasHeader.checked); break;
+        case 'csv':     result = formatDelimited(rows, ',');             break;
+        case 'tsv':     result = formatDelimited(rows, '\t');            break;
+        case 'python':  result = formatPython(rows, hasHeader.checked);  break;
+        case 'sql':     result = formatSql(rows, hasHeader.checked, sqlTable.value); break;
+        default:        result = formatMarkdown(rows, hasHeader.checked);
+      }
+    }
+    output.value = result;
+
+    inCount.textContent  = rows.length + ' row' + (rows.length === 1 ? '' : 's');
+    // data rows = parsed rows minus the header (when present)
+    const dataRowCount = hasHeader.checked ? Math.max(0, rows.length - 1) : rows.length;
+    outCount.textContent = dataRowCount + ' row' + (dataRowCount === 1 ? '' : 's');
+  }
+
+  ['input','change'].forEach(ev => {
+    input.addEventListener(ev, () => { debouncedUpdate(); debouncedSync(); });
+    [inFmt, outFmt, hasHeader, trimCells, sqlTable].forEach(el =>
+      el.addEventListener(ev, () => { update(); debouncedSync(); }));
+  });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    inFmt.value = 'auto'; outFmt.value = 'markdown';
+    hasHeader.checked = true; trimCells.checked = true;
+    sqlTable.value = 'my_table';
+    update();
+    syncHash();
+  });
+
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>
