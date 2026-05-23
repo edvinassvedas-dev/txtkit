@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>replace &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">Input</span><span class="count" id="inCount">0 chars</span></div>
+    <textarea id="input" placeholder="paste code or text here"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Output</span><span class="count" id="outCount">0 replacements</span></div>
+    <textarea id="output" readonly placeholder="result"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Dictionary</span><span class="dict-status" id="dictStatus">No dictionary loaded</span></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell full">
+      <span class="opt-label">CSV file <span class="hint">columns: subset, old_value, new_value</span></span>
+      <div class="sep-row">
+        <button id="loadBtn" type="button">Load dictionary CSV&hellip;</button>
+        <button id="clearDictBtn" type="button" hidden>Clear</button>
+        <input type="file" id="fileInput" accept=".csv,text/csv" hidden>
+      </div>
+    </div>
+
+    <div class="opt-cell full">
+      <span class="opt-label">Subsets <span class="hint">tick the subsets to apply</span></span>
+      <div class="subset-active" id="subsetActive">
+        <span class="hint">No subsets active</span>
+      </div>
+      <div class="subset-search">
+        <input type="text" id="subsetFilter" placeholder="filter by name" autocomplete="off">
+        <span class="subset-stats" id="subsetStats">load a dictionary to choose subsets</span>
+      </div>
+      <div class="subset-list" id="subsetList"></div>
+    </div>
+
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell full">
+      <span class="opt-label">Matching</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="wholeIdent" checked>
+          <span>Whole identifier only<small>match only when surrounded by word boundaries; turn off to match anywhere as substring</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="caseSensitive" checked>
+          <span>Case sensitive<small>"Sales" and "sales" are treated as different identifiers</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output');
+  const inCount = $('inCount'), outCount = $('outCount');
+  const loadBtn = $('loadBtn'), clearDictBtn = $('clearDictBtn'), fileInput = $('fileInput');
+  const dictStatus = $('dictStatus');
+  const subsetActive = $('subsetActive'), subsetList = $('subsetList');
+  const subsetFilter = $('subsetFilter'), subsetStats = $('subsetStats');
+  const wholeIdent = $('wholeIdent'), caseSensitive = $('caseSensitive');
+
+  const STORAGE_KEY = 'txtkit-replace-dict';
+
+  setupCopyButton($('copyOut'), output);
+
+  // ---------- CSV parsing --RFC-4180 style-- reused pattern from tabulate) ----------
+  function parseLine(line, delim) {
+    const cells = []; let cur = ''; let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (line[i+1] === '"') { cur += '"'; i++; }
+          else inQ = false;
+        } else cur += ch;
+      } else if (ch === '"') inQ = true;
+      else if (ch === delim) { cells.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    cells.push(cur);
+    return cells;
+  }
+
+  // The 'subset' column is optional
+  const BLANK_SUBSET = '(blank)';
+
+  function parseCsv(text) {
+    const lines = text.split(/\r?\n/);
+    while (lines.length && lines[lines.length-1] === '') lines.pop();
+    if (!lines.length) return { error: 'empty file' };
+    const header = parseLine(lines[0], ',').map(s => s.trim().toLowerCase());
+    const iSub = header.indexOf('subset');   // may be -1 (column absent)
+    const iOld = header.indexOf('old_value');
+    const iNew = header.indexOf('new_value');
+    if (iOld < 0 || iNew < 0) {
+      return { error: 'CSV must have columns: old_value, new_value (subset is optional)' };
+    }
+    const rows = [];
+    for (let r = 1; r < lines.length; r++) {
+      const cells = parseLine(lines[r], ',');
+      const subRaw = iSub >= 0 ? (cells[iSub] || '').trim() : '';
+      const sub = subRaw || BLANK_SUBSET;
+      const oldV = (cells[iOld] || '');
+      const newV = (cells[iNew] || '');
+      if (!oldV) continue;  // a row without an old_value is unusable
+      rows.push({ subset: sub, old: oldV, new: newV });
+    }
+    return { rows };
+  }
+
+  // ---------- dictionary state -----
+  // dict = { name, rows: [{subset, old, new}] }
+  let dict = null;
+  let activeSubsets = new Set();   // subset names the user has ticked
+
+  function loadFromStorage() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.rows)) return parsed;
+    } catch (e) { /* corrupt or unavailable */ }
+    return null;
+  }
+
+  function saveToStorage(d) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); return true; }
+    catch (e) { return false; }
+  }
+
+  function clearStorage() {
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  }
+
+  // ----- UI rendering -------
+  function renderStatus() {
+    if (dict) {
+      dictStatus.textContent = 'Loaded: ' + dict.name;
+      clearDictBtn.hidden = false;
+    } else {
+      dictStatus.textContent = 'No dictionary loaded';
+      clearDictBtn.hidden = true;
+    }
+  }
+
+  function uniqueSubsets() {
+    if (!dict) return [];
+    const seen = new Set();
+    for (const r of dict.rows) seen.add(r.subset);
+    return Array.from(seen).sort((a,b) => a.localeCompare(b));
+  }
+
+  //
+  function renderActive() {
+    subsetActive.innerHTML = '';
+    if (!activeSubsets.size) {
+      const span = document.createElement('span');
+      span.className = 'hint';
+      span.textContent = 'No subsets active';
+      subsetActive.appendChild(span);
+      return;
+    }
+    for (const s of activeSubsets) {
+      const chip = document.createElement('span');
+      chip.className = 'active-chip';
+      const label = document.createElement('span');
+      label.className = 'active-chip-label';
+      label.textContent = s;
+      label.title = s;
+      const x = document.createElement('button');
+      x.className = 'active-chip-x';
+      x.type = 'button';
+      x.textContent = '\u00D7';
+      x.title = 'remove ' + s;
+      x.addEventListener('click', () => {
+        activeSubsets.delete(s);
+        renderActive(); renderList();
+        update(); syncHash();
+      });
+      chip.appendChild(label);
+      chip.appendChild(x);
+      subsetActive.appendChild(chip);
+    }
+  }
+
+  // Render the search-filtered checkbox list
+  function renderList() {
+    subsetList.innerHTML = '';
+    if (!dict) {
+      subsetStats.textContent = 'load a dictionary to choose subsets';
+      return;
+    }
+    const all = uniqueSubsets();
+    if (!all.length) {
+      subsetStats.textContent = 'dictionary has no subsets';
+      return;
+    }
+    const q = subsetFilter.value.trim().toLowerCase();
+    const filtered = q ? all.filter(s => s.toLowerCase().includes(q)) : all;
+
+    subsetStats.textContent = q
+      ? all.length + ' subsets, showing ' + filtered.length + ' matching \u201C' + subsetFilter.value.trim() + '\u201D'
+      : all.length + ' subset' + (all.length === 1 ? '' : 's');
+
+    // 
+    const allRow = document.createElement('label');
+    allRow.className = 'subset-row subset-row-all';
+    const allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    const activeCount = activeSubsets.size;
+    if (activeCount === 0)           { allCb.checked = false; allCb.indeterminate = false; }
+    else if (activeCount === all.length) { allCb.checked = true;  allCb.indeterminate = false; }
+    else                                  { allCb.checked = false; allCb.indeterminate = true;  }
+    const allText = document.createElement('span');
+    allText.className = 'subset-row-label';
+    allText.textContent = '(all)';
+    allRow.title = 'tick to select every subset, untick to clear';
+    allCb.addEventListener('change', () => {
+      // if currently all selected, clear; otherwise select all
+      if (activeSubsets.size === all.length) activeSubsets = new Set();
+      else activeSubsets = new Set(all);
+      renderActive(); renderList();   // refresh both regions to reflect new state
+      update(); syncHash();
+    });
+    allRow.appendChild(allCb);
+    allRow.appendChild(allText);
+    subsetList.appendChild(allRow);
+
+    for (const s of filtered) {
+      const row = document.createElement('label');
+      row.className = 'subset-row';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = activeSubsets.has(s);
+      const text = document.createElement('span');
+      text.className = 'subset-row-label';
+      text.textContent = s;
+      const count = dict.rows.filter(r => r.subset === s).length;
+      row.title = s + ' (' + count + ' row' + (count === 1 ? '' : 's') + ')';
+      cb.addEventListener('change', () => {
+        if (cb.checked) activeSubsets.add(s);
+        else activeSubsets.delete(s);
+        renderActive(); renderList();   // re-render to update
+        update(); syncHash();
+      });
+      row.appendChild(cb);
+      row.appendChild(text);
+      subsetList.appendChild(row);
+    }
+  }
+
+  function renderSubsets() {
+    renderActive();
+    renderList();
+  }
+
+  // ---------- replacement engine --------
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function applyReplacements(text, rules, options) {
+    if (!text || !rules.length) return { text, count: 0 };
+    // sort longest old-value first, so e.g. SalesTax wins over Sales
+    const sorted = rules.slice().sort((a,b) => b.old.length - a.old.length);
+    const flags = 'g' + (options.caseInsensitive ? 'i' : '');
+    let count = 0;
+    for (const r of sorted) {
+      if (!r.old) continue;
+      const body = escapeRegex(r.old);
+      const pattern = options.wholeIdent ? ('\\b' + body + '\\b') : body;
+      let re;
+      try { re = new RegExp(pattern, flags); }
+      catch (e) { continue; }
+      text = text.replace(re, () => { count++; return r.new; });
+    }
+    return { text, count };
+  }
+
+  // ---------- URL hash state ---------
+  function syncHash() {
+    writeHashParams({
+      s:  activeSubsets.size ? Array.from(activeSubsets).join(',') : '',
+      w:  wholeIdent.checked   ? '' : '0',
+      c:  caseSensitive.checked? '' : '0',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (p.has('s')) {
+      activeSubsets = new Set(p.get('s').split(',').filter(Boolean));
+    }
+    if (p.get('w') === '0') wholeIdent.checked = false;
+    if (p.get('c') === '0') caseSensitive.checked = false;
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  // ---------- main pipeline ---------
+  function update() {
+    const text = input.value;
+    inCount.textContent = text.length + ' char' + (text.length === 1 ? '' : 's');
+
+    if (!dict || !activeSubsets.size) {
+      output.value = text;
+      outCount.textContent = '0 replacements';
+      return;
+    }
+    const rules = dict.rows.filter(r => activeSubsets.has(r.subset));
+    const opts = {
+      wholeIdent:      wholeIdent.checked,
+      caseInsensitive: !caseSensitive.checked,
+    };
+    const { text: out, count } = applyReplacements(text, rules, opts);
+    output.value = out;
+    outCount.textContent = count + ' replacement' + (count === 1 ? '' : 's');
+  }
+
+  // ---------- file loading ---------
+  loadBtn.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = parseCsv(String(reader.result || ''));
+      if (result.error) {
+        dictStatus.textContent = 'Error: ' + result.error;
+        return;
+      }
+      dict = { name: file.name, rows: result.rows };
+      // dropping subsets that no longer exist in the new dictionary
+      const valid = new Set(uniqueSubsets());
+      activeSubsets = new Set(Array.from(activeSubsets).filter(s => valid.has(s)));
+      // if the dictionary has only the (blank) subset, auto-activate it so a column-less CSV works without an extra click
+      if (valid.size === 1 && valid.has(BLANK_SUBSET) && !activeSubsets.size) {
+        activeSubsets.add(BLANK_SUBSET);
+      }
+      const ok = saveToStorage(dict);
+      renderStatus();
+      if (!ok) dictStatus.textContent += ' (session only; too large to save)';
+      renderSubsets();
+      update(); syncHash();
+    };
+    reader.onerror = () => { dictStatus.textContent = 'Error: could not read file'; };
+    reader.readAsText(file);
+    // reset the input
+    fileInput.value = '';
+  });
+
+  clearDictBtn.addEventListener('click', () => {
+    dict = null;
+    activeSubsets = new Set();
+    clearStorage();
+    renderStatus();
+    renderSubsets();
+    update(); syncHash();
+  });
+
+  // ---------- listeners ---------
+  ['input','change'].forEach(ev => {
+    input.addEventListener(ev, () => { debouncedUpdate(); });
+    [wholeIdent, caseSensitive].forEach(el =>
+      el.addEventListener(ev, () => { update(); debouncedSync(); }));
+  });
+  subsetFilter.addEventListener('input', () => { renderList(); });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    wholeIdent.checked = true; caseSensitive.checked = true;
+    activeSubsets = new Set();
+    subsetFilter.value = '';
+    renderSubsets();
+    update(); syncHash();
+  });
+
+  // ---------- boot ---------
+  dict = loadFromStorage();
+  loadHash();
+  //
+  if (dict) {
+    const valid = new Set(uniqueSubsets());
+    activeSubsets = new Set(Array.from(activeSubsets).filter(s => valid.has(s)));
+    if (valid.size === 1 && valid.has(BLANK_SUBSET) && !activeSubsets.size) {
+      activeSubsets.add(BLANK_SUBSET);
+    }
+  }
+  renderStatus();
+  renderSubsets();
+  update();
+})();
+</script>
+</body>
+</html>

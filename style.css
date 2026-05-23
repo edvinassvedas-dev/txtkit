@@ -198,6 +198,9 @@ button.flash {
   font-size: 13px; font-weight: 600;
   display: flex; justify-content: space-between; align-items: center;
 }
+.opt-head .dict-status{
+  font-weight:400;font-size:12px;color:var(--text-3);
+}
 .opt-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; }
 .opt-cell {
   padding: 12px;
@@ -241,6 +244,64 @@ select:focus { border-color: var(--focus); }
   background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
 }
 .qchip:disabled { opacity: .4; cursor: not-allowed; }
+/* replace tool — subset picker (active chips above, filter + checkbox list below) */
+.subset-active{
+  display:flex;flex-wrap:wrap;gap:6px;
+  min-height:24px;
+  margin-bottom:10px;
+}
+.active-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:2px 4px 2px 8px;
+  border:1px solid var(--border-input);
+  background:var(--surface);
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:12px;
+}
+.active-chip-label{color:var(--text);}
+.active-chip-x{
+  border:0;background:transparent;
+  color:var(--text-3);
+  font-family:inherit;font-size:14px;line-height:1;
+  padding:0 4px;cursor:pointer;
+}
+.active-chip-x:hover{color:var(--text);background:transparent;}
+
+.subset-search{
+  display:flex;align-items:center;gap:10px;
+  margin-bottom:8px;
+}
+.subset-search input{flex:1;min-width:0;}
+.subset-stats{
+  font-size:11px;color:var(--text-4);
+  white-space:nowrap;
+}
+
+.subset-list{
+  max-height:280px;overflow-y:auto;
+  border:1px solid var(--border-3);
+  background:var(--bg);
+}
+.subset-row{
+  display:flex;align-items:center;gap:8px;
+  padding:4px 8px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:13px;
+  cursor:pointer;
+  border-bottom:1px solid var(--border-3);
+}
+.subset-row:last-child{border-bottom:0;}
+.subset-row:hover{background:var(--hover);}
+.subset-row input{margin:0;}
+.subset-row-label{flex:1;color:var(--text);}
+
+.subset-row-all{
+  border-bottom:1px solid var(--border);  /* heavier than regular row separator */
+  background:var(--surface);              /* faint tint */
+}
+.subset-row-all .subset-row-label{
+  font-style:italic;                      /* signal: synthetic, not a real subset name */
+}
 
 .qrow { display: flex; gap: 8px; }
 .qrow > div { flex: 1; }

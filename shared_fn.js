@@ -17,6 +17,8 @@ const TOOLS = [
     description: 'Turn tabular text into MD, CSV, PY, or SQL' },
   { file: 'mdtoc.html', label: 'mdtoc',
     description: 'Generate a table of contents from markdown headings' },
+  { file: 'replace.html', label: 'replace',
+    description: 'Apply a CSV-driven dictionary of identifier renames to code or text' },
 ];
 
 // ---------- Theme toggle----------
