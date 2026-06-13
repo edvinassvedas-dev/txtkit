@@ -165,6 +165,7 @@ textarea {
   font-size: 13px; line-height: 1.5;
   min-height: clamp(100px, 25vh, 200px);
 }
+textarea:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
 .box-foot {
   display: flex; justify-content: flex-end; gap: 6px;
   padding: 6px 8px;
