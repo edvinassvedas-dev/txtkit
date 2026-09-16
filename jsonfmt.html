@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>jsonfmt &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">JSON</span><span class="count" id="inStatus">0 chars</span></div>
+    <textarea id="input" placeholder="paste JSON here"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Formatted</span><span class="count" id="outStatus"></span></div>
+    <textarea id="output" readonly placeholder="formatted JSON"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Indent <span class="hint">spacing used in the output</span></span>
+      <div class="sep-row">
+        <select id="indent">
+          <option value="2" selected>2 spaces</option>
+          <option value="4">4 spaces</option>
+          <option value="tab">tab</option>
+          <option value="minify">minify</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Behaviour</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="sortKeys">
+          <span>Sort keys alphabetically<small>reorders object keys at every nesting level</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output');
+  const indent = $('indent'), sortKeys = $('sortKeys');
+  const inStatus = $('inStatus'), outStatus = $('outStatus');
+
+  setupCopyButton($('copyOut'), output);
+
+  // ---- URL hash state config ----
+  function syncHash() {
+    writeHashParams({
+      i: indent.value !== '2' ? indent.value : '',
+      s: sortKeys.checked ? '1' : '',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (['2','4','tab','minify'].indexOf(p.get('i')) >= 0) indent.value = p.get('i');
+    if (p.get('s') === '1') sortKeys.checked = true;
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  function parseJson(src) {
+    let i = 0;
+
+    function fail(msg, pos) {
+      if (pos === undefined) pos = i;
+      const upto = src.slice(0, pos);
+      const line = upto.split('\n').length;
+      const col  = pos - (upto.lastIndexOf('\n') + 1) + 1;
+      throw new Error(msg + ' at line ' + line + ', column ' + col);
+    }
+
+    function ws() {
+      while (i < src.length) {
+        const c = src.charCodeAt(i);
+        if (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D) i++;
+        else break;
+      }
+    }
+
+    function string() {
+      const start = i;
+      i++;
+      for (;;) {
+        if (i >= src.length) fail('Unterminated string', start);
+        const c = src[i];
+        if (c === '"') { i++; return src.slice(start, i); }
+        if (c === '\\') {
+          i++;
+          const e = src[i];
+          if (e === undefined) fail('Unterminated string', start);
+          if ('"\\/bfnrt'.indexOf(e) >= 0) { i++; continue; }
+          if (e === 'u') {
+            i++;
+            for (let k = 0; k < 4; k++) {
+              if (!/[0-9a-fA-F]/.test(src[i] || '')) fail('Invalid \\u escape');
+              i++;
+            }
+            continue;
+          }
+          fail("Invalid escape '\\" + e + "'");
+        }
+        if (src.charCodeAt(i) < 0x20) fail('Invalid control character in string');
+        i++;
+      }
+    }
+
+    function digits() {
+      const start = i;
+      while (src[i] >= '0' && src[i] <= '9') i++;
+      if (i === start) fail('Invalid number');
+    }
+
+    function number() {
+      const start = i;
+      if (src[i] === '-') i++;
+      if (src[i] === '0') i++;
+      else digits();
+      if (src[i] === '.') { i++; digits(); }
+      if (src[i] === 'e' || src[i] === 'E') {
+        i++;
+        if (src[i] === '+' || src[i] === '-') i++;
+        digits();
+      }
+      return src.slice(start, i);
+    }
+
+    function object() {
+      i++;
+      const items = [];
+      ws();
+      if (src[i] === '}') { i++; return { t: 'obj', items: items }; }
+      for (;;) {
+        ws();
+        if (src[i] !== '"') fail(i >= src.length ? 'Unexpected end of input' : 'Expected property name');
+        const key = string();
+        ws();
+        if (src[i] !== ':') fail("Expected ':'");
+        i++;
+        items.push({ key: key, value: value() });
+        ws();
+        if (src[i] === ',') { i++; continue; }
+        if (src[i] === '}') { i++; return { t: 'obj', items: items }; }
+        fail(i >= src.length ? 'Unexpected end of input' : "Expected ',' or '}'");
+      }
+    }
+
+    function array() {
+      i++;
+      const items = [];
+      ws();
+      if (src[i] === ']') { i++; return { t: 'arr', items: items }; }
+      for (;;) {
+        items.push(value());
+        ws();
+        if (src[i] === ',') { i++; continue; }
+        if (src[i] === ']') { i++; return { t: 'arr', items: items }; }
+        fail(i >= src.length ? 'Unexpected end of input' : "Expected ',' or ']'");
+      }
+    }
+
+    function value() {
+      ws();
+      if (i >= src.length) fail('Unexpected end of input');
+      const c = src[i];
+      if (c === '{') return object();
+      if (c === '[') return array();
+      if (c === '"') return { t: 'lit', raw: string() };
+      if (c === '-' || (c >= '0' && c <= '9')) return { t: 'lit', raw: number() };
+      if (src.startsWith('true', i))  { i += 4; return { t: 'lit', raw: 'true' }; }
+      if (src.startsWith('false', i)) { i += 5; return { t: 'lit', raw: 'false' }; }
+      if (src.startsWith('null', i))  { i += 4; return { t: 'lit', raw: 'null' }; }
+      fail("Unexpected token '" + c + "'");
+    }
+
+    const root = value();
+    ws();
+    if (i < src.length) fail("Unexpected token '" + src[i] + "'");
+    return root;
+  }
+
+  function formatJson(node, space, sort) {
+    const nl = space ? '\n' : '';
+    const sp = space ? ' ' : '';
+
+    function emit(n, depth) {
+      if (n.t === 'lit') return n.raw;
+      if (!n.items.length) return n.t === 'arr' ? '[]' : '{}';
+      const pad    = space ? space.repeat(depth + 1) : '';
+      const padEnd = space ? space.repeat(depth) : '';
+      let parts;
+      if (n.t === 'arr') {
+        parts = n.items.map(it => pad + emit(it, depth + 1));
+      } else {
+        let items = n.items;
+        if (sort) {
+          items = items.slice().sort((a, b) => {
+            const ka = JSON.parse(a.key), kb = JSON.parse(b.key);
+            return ka < kb ? -1 : ka > kb ? 1 : 0;
+          });
+        }
+        parts = items.map(it => pad + it.key + ':' + sp + emit(it.value, depth + 1));
+      }
+      const open = n.t === 'arr' ? '[' : '{';
+      const close = n.t === 'arr' ? ']' : '}';
+      return open + nl + parts.join(',' + nl) + nl + padEnd + close;
+    }
+
+    return emit(node, 0);
+  }
+
+  function update(){
+    const raw = input.value;
+    inStatus.textContent = raw.length + ' chars';
+    if (!raw.trim()) {
+      output.value = '';
+      outStatus.textContent = '';
+      return;
+    }
+
+    let tree;
+    try {
+      tree = parseJson(raw);
+    } catch (e) {
+      output.value = '';
+      outStatus.textContent = 'Error: ' + e.message;
+      return;
+    }
+
+    const space = indent.value === 'minify' ? ''
+                : indent.value === 'tab'    ? '\t'
+                : ' '.repeat(Number(indent.value));
+    output.value = formatJson(tree, space, sortKeys.checked);
+    outStatus.textContent = 'Valid';
+  }
+
+  ['input','change'].forEach(ev => {
+    input.addEventListener(ev, () => { debouncedUpdate(); debouncedSync(); });
+    [indent, sortKeys].forEach(el => el.addEventListener(ev, () => {
+      update();
+      debouncedSync();
+    }));
+  });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    indent.value = '2'; sortKeys.checked = false;
+    update();
+    syncHash();
+  });
+
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>

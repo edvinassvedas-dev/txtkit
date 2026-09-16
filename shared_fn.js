@@ -19,6 +19,8 @@ const TOOLS = [
     description: 'Generate a table of contents from markdown headings' },
   { file: 'replace.html', label: 'replace',
     description: 'Apply a CSV-driven dictionary of identifier renames to code or text' },
+  { file: 'jsonfmt.html', label: 'jsonfmt',
+    description: 'Format, minify, or sort keys in JSON' },
 ];
 
 // ---------- Theme toggle----------

@@ -14,6 +14,7 @@ Plain web tools for dealing with text
 - **tabulate** — turn tabular text into Markdown, CSV, Python, or SQL
 - **mdtoc** — generate a table of contents from markdown headings
 - **replace** — apply a CSV dictionary of identifier renames to code or text
+- **jsonfmt** — format, minify, or sort keys in JSON
 
 > Behavior config in the URL hash; theme config and dictionary for `replace` in localStorage.
 > Everything stays in your browser.
