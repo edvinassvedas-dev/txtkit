@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>template &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid grid-3">
+  <div class="box">
+    <div class="box-head"><span class="label">Input</span><span class="count" id="inCount">0 rows</span></div>
+    <textarea id="input" placeholder="paste list here"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Pattern</span><span class="count">{} row &middot; {1} field &middot; {#} number</span></div>
+    <textarea id="pattern" placeholder="DROP TABLE IF EXISTS raw.{};"></textarea>
+    <div class="box-foot"><button id="clearPat">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Output</span><span class="count" id="outCount">0 rows</span></div>
+    <textarea id="output" readonly placeholder="one rendered pattern per row"></textarea>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Row separator <span class="hint">how input is split into rows</span></span>
+      <div class="sep-row">
+        <select id="rowSepKind">
+          <option value="newline" selected>newline</option>
+          <option value="comma">comma</option>
+          <option value="comma-space">, (with space)</option>
+          <option value="semicolon">semicolon</option>
+          <option value="space">whitespace</option>
+          <option value="tab">tab</option>
+          <option value="pipe">pipe |</option>
+          <option value="custom">custom</option>
+          <option value="regex" title="complex patterns may freeze the tab">regex</option>
+        </select>
+        <input type="text" id="rowSepCustom" placeholder="custom or /regex/" disabled>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Field separator <span class="hint">how each row is split for {1} {2} {3}</span></span>
+      <div class="sep-row">
+        <select id="fldSepKind">
+          <option value="none" selected>none (whole row)</option>
+          <option value="tab">tab</option>
+          <option value="comma">comma</option>
+          <option value="comma-space">, (with space)</option>
+          <option value="semicolon">semicolon</option>
+          <option value="space">whitespace</option>
+          <option value="pipe">pipe |</option>
+          <option value="custom">custom</option>
+          <option value="regex" title="complex patterns may freeze the tab">regex</option>
+        </select>
+        <input type="text" id="fldSepCustom" placeholder="custom or /regex/" disabled>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Output separator <span class="hint">how rendered rows are joined</span></span>
+      <div class="sep-row">
+        <select id="outSepKind">
+          <option value="newline" selected>newline</option>
+          <option value="comma">comma</option>
+          <option value="comma-space">, (with space)</option>
+          <option value="semicolon">semicolon</option>
+          <option value="space">space</option>
+          <option value="tab">tab</option>
+          <option value="pipe">pipe |</option>
+          <option value="custom">custom</option>
+        </select>
+        <input type="text" id="outSepCustom" placeholder="custom" disabled>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Behaviour</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="skipEmpty" checked>
+          <span>Remove empty rows<small>skip rows that contain only whitespace</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="trimItems" checked>
+          <span>Trim whitespace<small>strip spaces around each row and field before substituting</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input'), pattern = $('pattern'), output = $('output');
+  const rowSepKind = $('rowSepKind'), rowSepCustom = $('rowSepCustom');
+  const fldSepKind = $('fldSepKind'), fldSepCustom = $('fldSepCustom');
+  const outSepKind = $('outSepKind'), outSepCustom = $('outSepCustom');
+  const skipEmpty = $('skipEmpty'), trimItems = $('trimItems');
+  const inCount = $('inCount'), outCount = $('outCount');
+
+  const DEFAULT_PATTERN = '{}';
+
+  // {} whole row, {N} nth field, {#} row number; the doubled form emits a literal {}
+  const PLACEHOLDER = /\{\{(\d*|#)\}\}|\{(\d*|#)\}/g;
+
+  setupCopyButton($('copyOut'), output);
+
+  // ---- URL hash state config ----
+  function syncHash() {
+    writeHashParams({
+      p:  pattern.value !== DEFAULT_PATTERN ? pattern.value : '',
+      rs: rowSepKind.value !== 'newline' ? rowSepKind.value : '',
+      rc: rowSepCustom.value || '',
+      fs: fldSepKind.value !== 'none'    ? fldSepKind.value : '',
+      fc: fldSepCustom.value || '',
+      os: outSepKind.value !== 'newline' ? outSepKind.value : '',
+      oc: outSepCustom.value || '',
+      se: skipEmpty.checked ? '' : '0',
+      t:  trimItems.checked ? '' : '0',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (p.has('p'))  pattern.value = p.get('p');
+    if (p.has('rs')) rowSepKind.value = p.get('rs');
+    if (p.has('rc')) rowSepCustom.value = p.get('rc');
+    if (p.has('fs')) fldSepKind.value = p.get('fs');
+    if (p.has('fc')) fldSepCustom.value = p.get('fc');
+    if (p.has('os')) outSepKind.value = p.get('os');
+    if (p.has('oc')) outSepCustom.value = p.get('oc');
+    if (p.get('se') === '0') skipEmpty.checked = false;
+    if (p.get('t')  === '0') trimItems.checked = false;
+    syncDisabled();
+  }
+  function syncDisabled() {
+    syncSeparatorDisabled(rowSepKind, rowSepCustom, true);
+    syncSeparatorDisabled(fldSepKind, fldSepCustom, true);
+    syncSeparatorDisabled(outSepKind, outSepCustom, false);
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  function splitFields(row) {
+    if (fldSepKind.value === 'none') return [row];
+    return row.split(getSplitter(fldSepKind.value, fldSepCustom.value));
+  }
+
+  function render(pat, row, fields, num) {
+    return pat.replace(PLACEHOLDER, (m, escaped, key) => {
+      if (escaped !== undefined) return '{' + escaped + '}';
+      if (key === '#') return String(num);
+      if (key === '')  return row;
+      const i = parseInt(key, 10);
+      return (i >= 1 && i <= fields.length) ? fields[i - 1] : '';
+    });
+  }
+
+  function update(){
+    let rows = splitItems(input.value, rowSepKind.value, rowSepCustom.value);
+    const rawCount = input.value.length ? rows.length : 0;
+
+    rows = processList(rows, { trim: trimItems.checked, skipEmpty: skipEmpty.checked });
+
+    const pat = pattern.value;
+    const rendered = pat ? rows.map((row, i) => {
+      let fields = splitFields(row);
+      if (trimItems.checked) fields = fields.map(s => s.trim());
+      return render(pat, row, fields, i + 1);
+    }) : [];
+
+    output.value = joinItems(rendered, outSepKind.value, outSepCustom.value);
+    inCount.textContent  = pluralLabel(rawCount, 'row');
+    outCount.textContent = pluralLabel(rendered.length, 'row');
+  }
+
+  ['input','change'].forEach(ev => {
+    [input, pattern].forEach(el => el.addEventListener(ev, () => { debouncedUpdate(); debouncedSync(); }));
+    [rowSepCustom, fldSepCustom, outSepCustom].forEach(el => el.addEventListener(ev, () => { update(); debouncedSync(); }));
+    [skipEmpty, trimItems, rowSepKind, fldSepKind, outSepKind].forEach(el => el.addEventListener(ev, () => {
+      syncDisabled();
+      update();
+      debouncedSync();
+    }));
+  });
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('clearPat').addEventListener('click', () => { pattern.value = ''; update(); syncHash(); pattern.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    pattern.value = DEFAULT_PATTERN;
+    rowSepKind.value = 'newline'; fldSepKind.value = 'none'; outSepKind.value = 'newline';
+    rowSepCustom.value = ''; fldSepCustom.value = ''; outSepCustom.value = '';
+    skipEmpty.checked = true; trimItems.checked = true;
+    syncDisabled();
+    update();
+    syncHash();
+  });
+
+  pattern.value = DEFAULT_PATTERN;
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>

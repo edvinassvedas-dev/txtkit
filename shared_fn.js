@@ -21,6 +21,8 @@ const TOOLS = [
     description: 'Apply a CSV-driven dictionary of identifier renames to code or text' },
   { file: 'jsonfmt.html', label: 'jsonfmt',
     description: 'Format, minify, or sort keys in JSON' },
+  { file: 'template.html', label: 'template',
+    description: 'Render a pattern once per input row' },
 ];
 
 // ---------- Theme toggle----------

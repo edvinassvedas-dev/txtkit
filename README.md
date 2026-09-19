@@ -15,6 +15,7 @@ Plain web tools for dealing with text
 - **mdtoc** — generate a table of contents from markdown headings
 - **replace** — apply a CSV dictionary of identifier renames to code or text
 - **jsonfmt** — format, minify, or sort keys in JSON
+- **template** — render a pattern once per input row
 
 > Behavior config in the URL hash; theme config and dictionary for `replace` in localStorage.
 > Everything stays in your browser.
