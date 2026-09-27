@@ -1,9 +1,16 @@
 # txtkit
 
-Plain web tools for dealing with text 
 
 **Live:** https://edvinassvedas-dev.github.io/txtkit/
 
+---
+
+Plain web tools for dealing with text.
+
+- **No dependencies.** That's why [sqlfmt](https://edvinassvedas-dev.github.io/sqlfmt/) lives elsewhere.
+- **Everything stays in your browser.** Input text is never stored. Options live in the URL hash; the theme and the `replace` dictionary in localStorage.
+
+---
 
 ## The kit
 
@@ -17,9 +24,6 @@ Plain web tools for dealing with text
 - **jsonfmt** — format, minify, or sort keys in JSON
 - **template** — render a pattern once per input row
 - **sqlchar** — rewrite special characters in SQL literals as CHAR()/CHR() calls *(used with Spark; other dialects tested in local containers only)*
-
-> Behavior config in the URL hash; theme config and dictionary for `replace` in localStorage.
-> Everything stays in your browser.
 
 ## License
 
