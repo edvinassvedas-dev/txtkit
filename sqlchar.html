@@ -1,0 +1,957 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<title>sqlchar &mdash; txtkit</title>
+<script>
+  try {
+    if (localStorage.getItem('txtkit-theme') !== 'light')
+      document.documentElement.setAttribute('data-theme','dark');
+  } catch(e) {
+    document.documentElement.setAttribute('data-theme','dark');
+  }
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<div id="site-header"></div>
+
+<div class="grid">
+  <div class="box">
+    <div class="box-head"><span class="label">Input</span><span class="count" id="inStatus">0 chars</span></div>
+    <textarea id="input" placeholder="paste a SQL script or a value here"></textarea>
+    <div class="box-foot"><button id="clearIn">Clear</button></div>
+  </div>
+  <div class="box">
+    <div class="box-head"><span class="label">Output</span><span class="count" id="outStatus"></span></div>
+    <div class="hl-wrap">
+      <div class="hl-back" id="outBack" aria-hidden="true"></div>
+      <textarea id="output" readonly placeholder="the same SQL, with risky characters rewritten as function calls"></textarea>
+    </div>
+    <div class="box-foot"><button class="primary" id="copyOut">Copy</button></div>
+  </div>
+</div>
+
+<div class="box preview-box">
+  <div class="box-head"><span class="label">Found characters</span><span class="count" id="repStatus"></span></div>
+  <textarea id="report" readonly wrap="off" placeholder="one line per character the encode options select"></textarea>
+  <div class="box-foot"><button id="copyRep">Copy</button></div>
+</div>
+
+<div class="options">
+  <div class="opt-head"><span>Options</span><button id="resetBtn">Reset</button></div>
+  <div class="opt-grid">
+
+    <div class="opt-cell">
+      <span class="opt-label">Dialect <span class="hint">database the script runs on</span></span>
+      <div class="sep-row">
+        <select id="dialect">
+          <option value="spark" selected>Spark SQL, Databricks</option>
+          <option value="tsql">SQL Server, Azure SQL, Synapse</option>
+          <option value="oracle">Oracle</option>
+          <option value="pg">PostgreSQL, DuckDB, Trino, Presto</option>
+          <option value="mysql">MySQL, MariaDB</option>
+          <option value="sqlite">SQLite</option>
+        </select>
+      </div>
+      <div class="checks"><small class="dialect-note" id="dialectNote"></small></div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Input <span class="hint">what the input box holds</span></span>
+      <div class="sep-row">
+        <select id="mode">
+          <option value="s" selected>SQL script</option>
+          <option value="v">single value</option>
+        </select>
+      </div>
+      <div class="checks"><small class="dialect-note" id="modeNote"></small></div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Encode <span class="hint">characters to rewrite inside string literals</span></span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="tNonAscii" checked>
+          <span>Non-ASCII (U+0080 and up)<small>encoding mismatches; also catches no-break spaces, zero-width spaces, smart quotes, dashes</small></span>
+        </label>
+        <div class="check-row">
+          <label class="check">
+            <input type="checkbox" id="tLines" checked>
+            <span>Line breaks<small>git and editors rewrite line endings; SQL*Plus cuts literals at blank lines</small></span>
+          </label>
+          <select id="eol" title="line ending to store for each line break">
+            <option value="lf" selected>as LF</option>
+            <option value="crlf">as CRLF</option>
+          </select>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="tCtrl" checked>
+          <span>Tabs and control characters<small>invisible; editors convert or strip them</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="tAmp">
+          <span>&amp;<small>SQL*Plus and SQLcl substitution variables, which prompt even inside literals</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="tDollar" checked>
+          <span>$<small>sqlcmd $(var), Flyway and Liquibase ${placeholder}, Spark ${var} (undefined names become empty)</small></span>
+        </label>
+        <div class="check-row">
+          <span class="also-label">Also encode</span>
+          <input type="text" id="also" placeholder="e.g. # for Octopus #{var}">
+        </div>
+      </div>
+    </div>
+
+    <div class="opt-cell">
+      <span class="opt-label">Output</span>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" id="keepLines" checked>
+          <span>Keep source lines<small>new output line after each encoded line break</small></span>
+        </label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</div>
+
+<script src="shared_fn.js"></script>
+<script>
+(function(){
+  // ---- core ----
+  // Pure functions, no DOM. The rules and limits come from tests on real engines;
+  // see sqlchar_proposal.md for the evidence behind each one.
+
+  const GROUP   = 50;    // max parts per level of a || or + chain; long flat chains fail to parse
+  const WRAP_AT = 200;   // start a new output line at the next separator after this column
+
+  const enc = new TextEncoder();
+  const hexByte = b => (b < 16 ? '0' : '') + b.toString(16).toUpperCase();
+  const hex4 = n => n.toString(16).toUpperCase().padStart(4, '0');
+  const cpsOf = s => Array.from(s, c => c.codePointAt(0));
+  const fromCps = a => a.map(c => String.fromCodePoint(c)).join('');
+  const quoteSql = s => "'" + s.replace(/'/g, "''") + "'";
+  const utf8Hex = s => Array.from(enc.encode(s), hexByte).join('');
+
+  // MySQL CHAR() takes bytes: the character's UTF-8 bytes read as one number
+  const utf8Number = cp => Array.from(enc.encode(String.fromCodePoint(cp))).reduce((n, b) => n * 256 + b, 0);
+
+  function lineColOf(src, pos) {
+    const before = src.slice(0, pos);
+    return [before.split('\n').length, Array.from(before.slice(before.lastIndexOf('\n') + 1)).length + 1];
+  }
+  const lineCol = (src, pos) => { const [l, c] = lineColOf(src, pos); return 'line ' + l + ', column ' + c; };
+
+  // ASCII characters become one part each; each stretch of non-ASCII goes to otherFn
+  function splitAscii(cps, asciiFn, otherFn) {
+    const parts = [];
+    let i = 0;
+    while (i < cps.length) {
+      if (cps[i] < 128) { parts.push(asciiFn(cps[i])); i++; continue; }
+      let j = i;
+      while (j < cps.length && cps[j] >= 128) j++;
+      otherFn(cps.slice(i, j)).forEach(p => parts.push(p));
+      i = j;
+    }
+    return parts;
+  }
+
+  const DIALECTS = {
+    spark: {
+      note: "' and \\ are always encoded; '' in existing literals is read as a quote (Databricks and Spark 3.5 would drop it)",
+      join: { call: 'concat' },
+      // '' means a quote in Spark 4.x but nothing in Spark 3.5 and Databricks, and
+      // escapedStringLiterals can switch \ escapes off
+      forced: (cps, i) => cps[i] === 39 || cps[i] === 92,
+      plain: s => "'" + s + "'",
+      // CHR() works modulo 256; DECODE() fails inside VALUES on Spark 4.x, CAST does not
+      encode: cps => splitAscii(cps, n => 'CHR(' + n + ')',
+        run => ["CAST(X'" + utf8Hex(fromCps(run)) + "' AS STRING)"]),
+    },
+    tsql: {
+      note: 'emoji need two NCHAR() values; values over 4,000 characters get an NVARCHAR(MAX) cast',
+      join: { op: '+' },
+      // inside T-SQL literals, a backslash before a line break is a line continuation
+      forced: (cps, i) => cps[i] === 92 && (cps[i + 1] === 10 || cps[i + 1] === 13),
+      plain: s => 'N' + quoteSql(s),
+      encode: cps => {
+        const parts = [];
+        cps.forEach(cp => {
+          if (cp < 128) { parts.push('CHAR(' + cp + ')'); return; }
+          const s = String.fromCodePoint(cp);
+          for (let k = 0; k < s.length; k++) parts.push('NCHAR(' + s.charCodeAt(k) + ')');
+        });
+        return parts;
+      },
+      // without a MAX type leftmost, the concatenation is cut at 4,000 characters
+      finish: (leaves, value) => {
+        if (value.length > 4000) leaves[0].text = 'CAST(' + leaves[0].text + ' AS NVARCHAR(MAX))';
+      },
+    },
+    oracle: {
+      note: 'TO_CHAR keeps values VARCHAR2 (limit 4,000 bytes); NVARCHAR2 columns in a non-Unicode database would lose characters',
+      join: { op: '||' },
+      forced: () => false,
+      plain: quoteSql,
+      encode: cps => splitAscii(cps, n => 'CHR(' + n + ')', run => {
+        // UNISTR's argument is a literal (4,000 bytes, 5 per \XXXX). Its NVARCHAR2 result
+        // caps values at 2,000 characters and, compared with a VARCHAR2 column, converts
+        // the column (ORA-01401 on longer rows, no index); TO_CHAR keeps it VARCHAR2.
+        const chunks = [];
+        let cur = '', n = 0;
+        run.forEach(cp => {
+          const s = String.fromCodePoint(cp);
+          if (n + s.length > 799) { chunks.push(cur); cur = ''; n = 0; }
+          for (let k = 0; k < s.length; k++) cur += '\\' + hex4(s.charCodeAt(k));
+          n += s.length;
+        });
+        chunks.push(cur);
+        return chunks.map(c => "TO_CHAR(UNISTR('" + c + "'))");
+      }),
+    },
+    pg: {
+      note: 'rewritten values are text: json, jsonb, xml and enum columns need an explicit cast such as ::jsonb',
+      join: { op: '||' },
+      forced: () => false,
+      plain: quoteSql,
+      encode: cps => cps.map(cp => {
+        if (cp === 0) throw new Error('U+0000 cannot be stored in PostgreSQL text');
+        return 'CHR(' + cp + ')';
+      }),
+    },
+    mysql: {
+      note: '\\ is always encoded, since sql_mode decides whether it escapes; parts are joined with CONCAT()',
+      join: { call: 'CONCAT' },
+      forced: (cps, i) => cps[i] === 92,
+      plain: quoteSql,
+      encode: cps => ['CHAR(' + cps.map(utf8Number).join(', ') + ' USING utf8mb4)'],
+    },
+    sqlite: {
+      note: '',
+      join: { op: '||' },
+      forced: () => false,
+      plain: quoteSql,
+      encode: cps => ['CHAR(' + cps.join(', ') + ')'],
+    },
+  };
+
+  // t: { nonAscii, lineBreaks, controls, amp, dollar, also: Set of code points }
+  function isTarget(cp, t) {
+    if (t.also.has(cp)) return true;
+    if (cp >= 128) return t.nonAscii;
+    if (cp === 10 || cp === 13) return t.lineBreaks;
+    if (cp < 32 || cp === 127) return t.controls;
+    if (cp === 38) return t.amp;
+    if (cp === 36) return t.dollar;
+    return false;
+  }
+
+  function markValue(value, d, o) {
+    const cps = cpsOf(value);
+    return { cps, mark: cps.map((cp, i) => !!o.forceAll || isTarget(cp, o.t) || d.forced(cps, i)) };
+  }
+
+  // Plain runs become literals, marked runs become function calls. A run ends after
+  // each line feed, so "Keep source lines" can break the output line there.
+  function buildLeaves(value, d, o) {
+    const { cps, mark } = markValue(value, d, o);
+    const leaves = [];
+    let i = 0, encoded = 0;
+    while (i < cps.length) {
+      let j = i;
+      if (!mark[i]) {
+        while (j < cps.length && !mark[j]) j++;
+        leaves.push({ text: d.plain(fromCps(cps.slice(i, j))), hl: false });
+      } else {
+        while (j < cps.length && mark[j] && (j === i || cps[j - 1] !== 10)) j++;
+        d.encode(cps.slice(i, j), value).forEach(p => leaves.push({ text: p, hl: true }));
+        if (cps[j - 1] === 10) leaves[leaves.length - 1].endsLine = true;
+        encoded += j - i;
+      }
+      i = j;
+    }
+    if (!leaves.length) leaves.push({ text: d.plain(''), hl: false });
+    if (d.finish) d.finish(leaves, value);
+    return { leaves, encoded };
+  }
+
+  // Function-call joins take any number of arguments; || and + chains are nested in
+  // parenthesised groups so their depth grows with the logarithm of the length.
+  function buildTree(leaves, d) {
+    if (leaves.length === 1) return leaves[0];
+    if (d.join.call) return { call: d.join.call, items: leaves };
+    let items = leaves;
+    while (items.length > GROUP) {
+      const groups = [];
+      for (let k = 0; k < items.length; k += GROUP) {
+        const g = items.slice(k, k + GROUP);
+        groups.push(g.length === 1 ? g[0] : { op: d.join.op, items: g, paren: true });
+      }
+      items = groups;
+    }
+    return { op: d.join.op, items };
+  }
+
+  function render(node, o) {
+    let out = '', col = o.startCol || 0, pending = false;
+    const hl = [], indent = o.indent || '';
+    function put(t, mark) {
+      if (mark) hl.push([out.length, out.length + t.length]);
+      out += t;
+      const nl = t.lastIndexOf('\n');
+      col = nl < 0 ? col + t.length : t.length - nl - 1;
+    }
+    function newLine(extra) { out += '\n' + indent + extra; col = indent.length + extra.length; }
+    function sep(op) {
+      const brk = (o.keepLines && pending) || col > WRAP_AT;
+      pending = false;
+      if (!op) { put(','); if (brk) newLine('  '); else put(' '); }
+      else if (brk) { newLine(''); put(op + ' '); }
+      else put(' ' + op + ' ');
+    }
+    function walk(n) {
+      if (n.text !== undefined) { put(n.text, n.hl); if (n.endsLine) pending = true; return; }
+      put(n.call ? n.call + '(' : n.paren ? '(' : '');
+      n.items.forEach((it, k) => { if (k) sep(n.call ? null : n.op); walk(it); });
+      put(n.call || n.paren ? ')' : '');
+    }
+    if (o.wrap) put('(');
+    walk(node);
+    if (o.wrap) put(')');
+    return { text: out, hl };
+  }
+
+  // o: { t, keepLines, startCol, indent, wrap, forceAll }
+  function encodeValue(value, dk, o) {
+    const d = DIALECTS[dk];
+    const { leaves, encoded } = buildLeaves(value, d, o);
+    const tree = buildTree(leaves, d);
+    const r = render(tree, Object.assign({}, o, { wrap: o.wrap && tree.text === undefined && !tree.call }));
+    r.encoded = encoded;
+    return r;
+  }
+
+  // ---- self-check ----
+  // Evaluates sqlchar's own output the way each engine behaves, so a broken rule shows
+  // up as an error instead of a script that stores the wrong value.
+  function evaluate(src, dk) {
+    let i = 0;
+    const fail = msg => { throw new Error('self-check failed: ' + msg); };
+    const ws = () => { while (i < src.length && /\s/.test(src[i])) i++; };
+    const eat = t => { ws(); if (src.startsWith(t, i)) { i += t.length; return true; } return false; };
+    const expect = t => { if (!eat(t)) fail("expected '" + t + "' at offset " + i); };
+    const V = (s, extra) => Object.assign({ s: s, nchar: false, max: false, nul: false }, extra);
+    const utf8 = bytes => {
+      try { return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes)); }
+      catch (e) { return fail('invalid UTF-8 bytes'); }
+    };
+    function quoted() {
+      ws();
+      if (src[i] !== "'") fail("expected a literal at offset " + i);
+      let s = '';
+      i++;
+      for (;;) {
+        if (i >= src.length) fail('unterminated literal');
+        if (src[i] === "'") {
+          if (src[i + 1] === "'") { s += "'"; i += 2; continue; }
+          i++;
+          return s;
+        }
+        s += src[i++];
+      }
+    }
+    function number() {
+      ws();
+      const re = /\d+/y;
+      re.lastIndex = i;
+      const m = re.exec(src);
+      if (!m) fail('expected a number at offset ' + i);
+      i += m[0].length;
+      return Number(m[0]);
+    }
+    function numbers() { const a = [number()]; while (eat(',')) a.push(number()); return a; }
+    function checkOracle(v) {
+      if (v.nchar ? v.s.length > 2000 : enc.encode(v.s).length > 4000)
+        fail("value over Oracle's " + (v.nchar ? '2,000-character NVARCHAR2' : '4,000-byte') + ' limit (ORA-01489)');
+      return v;
+    }
+    function cat(a, b) {
+      if (a.nul || b.nul) return V('', { nul: true });
+      const v = V(a.s + b.s, { nchar: a.nchar || b.nchar, max: a.max || b.max });
+      if (dk === 'tsql' && !v.max && v.s.length > 4000) v.s = v.s.slice(0, 4000);
+      return dk === 'oracle' ? checkOracle(v) : v;
+    }
+    function plainLiteral(s) {
+      if (dk === 'spark' && /['\\]/.test(s)) fail("' or \\ inside a Spark literal");
+      if (dk === 'mysql' && /\\/.test(s)) fail('\\ inside a MySQL literal');
+      if (dk === 'tsql') { s = s.replace(/\\\r?\n/g, ''); return V(s, { max: s.length > 4000 }); }
+      if (dk === 'oracle' && enc.encode(s).length > 4000) fail("literal over Oracle's 4,000-byte limit (ORA-01704)");
+      return V(s);
+    }
+    function call(name) {
+      switch (dk + ':' + name) {
+        case 'spark:CHR': return V(String.fromCharCode(number() % 256));
+        case 'spark:CAST': {
+          ws();
+          if (src[i] !== 'X') fail("expected X'…'");
+          i++;
+          const h = quoted();
+          expect('AS'); expect('STRING');
+          return V(utf8((h.match(/../g) || []).map(x => parseInt(x, 16))));
+        }
+        case 'spark:CONCAT': case 'mysql:CONCAT': {
+          let v = expr();
+          while (eat(',')) v = cat(v, expr());
+          return v;
+        }
+        case 'tsql:CHAR': {
+          const n = number();
+          if (n > 127) fail('CHAR(' + n + ') depends on the collation code page');
+          return V(String.fromCharCode(n));
+        }
+        case 'tsql:NCHAR': {
+          const n = number();
+          return n > 0xFFFF ? V('', { nul: true }) : V(String.fromCharCode(n));
+        }
+        case 'tsql:CAST': {
+          const v = expr();
+          expect('AS'); expect('NVARCHAR'); expect('('); expect('MAX'); expect(')');
+          return Object.assign({}, v, { max: true });
+        }
+        case 'oracle:CHR': case 'pg:CHR': {
+          const n = number();
+          if (dk === 'oracle' && n > 127) fail('CHR(' + n + ') depends on the database character set');
+          if (n === 0 && dk === 'pg') fail('CHR(0) is an error in PostgreSQL');
+          if (n > 0x10FFFF) fail('CHR(' + n + ') is out of range');
+          return V(String.fromCodePoint(n));
+        }
+        case 'oracle:UNISTR': {
+          const body = quoted();
+          if (enc.encode(body).length > 4000) fail("UNISTR argument over Oracle's 4,000-byte limit (ORA-01704)");
+          let s = '';
+          for (let k = 0; k < body.length;) {
+            if (body[k] !== '\\') { s += body[k++]; continue; }
+            if (body[k + 1] === '\\') { s += '\\'; k += 2; continue; }
+            const h = body.substr(k + 1, 4);
+            if (!/^[0-9A-Fa-f]{4}$/.test(h)) fail('bad UNISTR escape');
+            s += String.fromCharCode(parseInt(h, 16));
+            k += 5;
+          }
+          return checkOracle(V(s, { nchar: true }));
+        }
+        case 'oracle:TO_CHAR': return checkOracle(V(expr().s));
+        case 'mysql:CHAR': {
+          const bytes = [];
+          numbers().forEach(n => {
+            const b = [];
+            do { b.unshift(n % 256); n = Math.floor(n / 256); } while (n > 0);
+            b.forEach(x => bytes.push(x));
+          });
+          expect('USING'); expect('utf8mb4');
+          return V(utf8(bytes));
+        }
+        case 'sqlite:CHAR': return V(fromCps(numbers()));
+      }
+      return fail('unknown function ' + name);
+    }
+    function term() {
+      ws();
+      if (src[i] === '(') { i++; const v = expr(); expect(')'); return v; }
+      if (src[i] === "'") return plainLiteral(quoted());
+      if (dk === 'tsql' && src[i] === 'N' && src[i + 1] === "'") { i++; return plainLiteral(quoted()); }
+      const re = /[A-Za-z_]+/y;
+      re.lastIndex = i;
+      const m = re.exec(src);
+      if (!m) fail('unexpected ' + (src[i] ? "'" + src[i] + "'" : 'end') + ' at offset ' + i);
+      i += m[0].length;
+      expect('(');
+      const v = call(m[0].toUpperCase());
+      expect(')');
+      return v;
+    }
+    function expr() {
+      let v = term(), n = 1;
+      const op = DIALECTS[dk].join.op;
+      while (op && eat(op)) {
+        v = cat(v, term());
+        if (++n > GROUP) fail('a chain of more than ' + GROUP + ' parts is too long to parse');
+      }
+      return v;
+    }
+    const v = expr();
+    ws();
+    if (i < src.length) fail("unexpected '" + src[i] + "' at offset " + i);
+    if (v.nul) fail('the value is NULL');
+    return v.s;
+  }
+
+  // ---- script mode ----
+  // Words after which a literal may be replaced by an expression. After any other word
+  // (COMMENT, IS, LOCATION, ESCAPE, DATE, AS, BY, …) the literal is left alone and reported.
+  const EXPR_WORDS = new Set(('SELECT DISTINCT ALL VALUES WHERE HAVING AND OR NOT THEN ELSE WHEN CASE ' +
+    'IN LIKE ILIKE RLIKE REGEXP GLOB BETWEEN RETURN DEFAULT PRINT ANY SOME').split(' '));
+  // Statement keywords; a literal is left alone when the nearest one before it is EXEC or THROW
+  const STMT_WORDS = new Set(('SELECT INSERT UPDATE DELETE MERGE EXEC EXECUTE THROW SET DECLARE PRINT ' +
+    'IF WHILE RETURN CREATE ALTER DROP WITH CALL BEGIN END').split(' '));
+  const LITERAL_ONLY_PARENS = new Set(['TBLPROPERTIES', 'OPTIONS', 'RAISERROR']);
+
+  // Splits a script into comments, quoted identifiers, literals, words and punctuation.
+  // Literal values are decoded the way the engine reads them with default settings.
+  function lexScript(src, dk, rawEol) {
+    const toks = [], n = src.length;
+    const backslash = dk === 'mysql' || dk === 'spark';
+    let i = 0;
+    const fail = (msg, pos) => { throw new Error(msg + ' at ' + lineCol(src, pos)); };
+    const push = (kind, start, extra) => toks.push(Object.assign({ kind, start, end: i }, extra));
+
+    // one backslash escape at i, as MySQL or Spark decode it
+    function unescape() {
+      const e = src[i + 1];
+      if (dk === 'spark') {
+        if (e === 'u' && /^[0-9A-Fa-f]{4}$/.test(src.substr(i + 2, 4))) { i += 6; return String.fromCharCode(parseInt(src.substr(i - 4, 4), 16)); }
+        if (/^[0-3][0-7][0-7]$/.test(src.substr(i + 1, 3))) { i += 4; return String.fromCharCode(parseInt(src.substr(i - 3, 3), 8)); }
+      }
+      i += 2;
+      const map = { '0': '\0', b: '\b', n: '\n', r: '\r', t: '\t', Z: '\x1A', '%': '\\%', _: '\\_' };
+      return map[e] !== undefined ? map[e] : e;
+    }
+    // '…' body with '' doubling (and backslash escapes where the dialect has them)
+    function quotedBody(q, escapes) {
+      const open = i;
+      i++;
+      let v = '', doubled = -1;   // offset of the first doubled quote
+      for (;;) {
+        if (i >= n) fail('Unterminated string', open);
+        const c = src[i];
+        if (escapes && c === '\\') { if (i + 1 >= n) fail('Unterminated string', open); v += unescape(); continue; }
+        if (c === q) {
+          if (src[i + 1] === q) { if (doubled < 0) doubled = i; v += q; i += 2; continue; }
+          i++;
+          return { v, doubled };
+        }
+        v += c === '\n' ? rawEol : c;
+        i++;
+      }
+    }
+    function special(start, reason, q, escapes) { quotedBody(q, escapes); push('special', start, { reason }); }
+    function until(start, close, kind, reason) {
+      const at = src.indexOf(close, i);
+      if (at < 0) fail('Unterminated ' + (kind === 'comment' ? 'comment' : 'string'), start);
+      i = at + close.length;
+      push(kind, start, { reason });
+    }
+
+    while (i < n) {
+      const c = src[i], c2 = src[i + 1], start = i;
+      if (/\s/.test(c)) { i++; continue; }
+      if ((c === '-' && c2 === '-' && (dk !== 'mysql' || /\s/.test(src[i + 2] || ' '))) || (c === '#' && dk === 'mysql')) {
+        const e = src.indexOf('\n', i);
+        i = e < 0 ? n : e;
+        push('comment', start);
+        continue;
+      }
+      if (c === '/' && c2 === '*') {
+        if (dk !== 'pg') { i += 2; until(start, '*/', 'comment'); continue; }
+        let depth = 0;   // PostgreSQL nests block comments
+        do {
+          if (i >= n) fail('Unterminated comment', start);
+          if (src.startsWith('/*', i)) { depth++; i += 2; }
+          else if (src.startsWith('*/', i)) { depth--; i += 2; }
+          else i++;
+        } while (depth > 0);
+        push('comment', start);
+        continue;
+      }
+      if (c === "'") {
+        const b = quotedBody("'", backslash);
+        push('str', start, { value: dk === 'tsql' ? b.v.replace(/\\\r?\n/g, '') : b.v, doubledAt: dk === 'spark' ? b.doubled : -1 });
+        continue;
+      }
+      if (c === '"') {
+        if (backslash) { special(start, 'double-quoted string', '"', true); continue; }
+        quotedBody('"', false);
+        push('ident', start);
+        continue;
+      }
+      if (c === '`') { quotedBody('`', false); push('ident', start); continue; }
+      if (c === '[' && (dk === 'tsql' || dk === 'sqlite')) { quotedBody(']', false); push('ident', start); continue; }
+      if (c === '$' && dk === 'pg' && (i === 0 || !/[\p{L}\p{N}_$]/u.test(src[i - 1]))) {
+        const re = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/y;
+        re.lastIndex = i;
+        const m = re.exec(src);
+        if (m) { i += m[0].length; until(start, m[0], 'special', 'dollar-quoted string'); continue; }
+      }
+      if (/[0-9]/.test(c)) {
+        while (i < n && /[0-9.]/.test(src[i])) i++;
+        push('num', start);
+        continue;
+      }
+      if (/[\p{L}_@#]/u.test(c)) {
+        while (i < n && /[\p{L}\p{N}_$#@]/u.test(src[i])) i++;
+        const w = src.slice(start, i).toUpperCase();
+        if (src[i] === "'") {
+          if (w === 'N' && dk !== 'spark' && dk !== 'sqlite') {
+            const b = quotedBody("'", backslash);
+            push('str', start, { value: dk === 'tsql' ? b.v.replace(/\\\r?\n/g, '') : b.v });
+            continue;
+          }
+          if (w === 'E' && dk === 'pg') { special(start, "E'…' literal", "'", true); continue; }
+          if (w === 'X' || w === 'B') { special(start, w + "'…' literal", "'", false); continue; }
+          if (w === 'R' && dk === 'spark') { i++; until(start, "'", 'special', "raw r'…' literal"); continue; }
+          if (w[0] === '_' && dk === 'mysql') { special(start, 'charset introducer', "'", true); continue; }
+          if ((w === 'Q' || w === 'NQ') && dk === 'oracle') {
+            const open = src[i + 1] || '';
+            const close = { '[': ']', '{': '}', '(': ')', '<': '>' }[open] || open;
+            i += 2;
+            until(start, close + "'", 'special', "q'…' literal");
+            continue;
+          }
+        }
+        if (w === 'U' && dk === 'pg' && src.startsWith("&'", i)) { i++; special(start, "U&'…' literal", "'", false); continue; }
+        push('word', start, { text: w });
+        continue;
+      }
+      i++;
+      push('punct', start, { text: c });
+    }
+    return toks;
+  }
+
+  // Decides for each literal whether it may be replaced, and whether the replacement
+  // needs parentheses. || and + bind tighter than comparisons, keywords and commas, so
+  // parentheses are only needed next to tighter operators (COLLATE, ::, *, -, ., [, << …).
+  function planScript(toks, dk) {
+    const sig = toks.filter(t => t.kind !== 'comment');
+    const owners = [];
+    let stmtFirst = null, lastTop = null;
+    const isStr = t => t && (t.kind === 'str' || t.kind === 'special');
+    const isPunct = (t, chars) => t && t.kind === 'punct' && chars.indexOf(t.text) >= 0;
+    const safePrev = k => {
+      const p = sig[k - 1], pp = sig[k - 2];
+      if (p && p.kind === 'word') return EXPR_WORDS.has(p.text);
+      if (isPunct(p, '<>') && pp && pp.end === p.start && isPunct(pp, '-' + p.text)) return false;  // -> ->> << >>
+      return isPunct(p, '(,=<>');
+    };
+    const safeNext = t => !t || isPunct(t, '),;=<>!') || (t.kind === 'word' && t.text !== 'COLLATE');
+    sig.forEach((t, k) => {
+      const prev = sig[k - 1], next = sig[k + 1];
+      if (t.kind === 'punct') {
+        if (t.text === '(') owners.push(prev && prev.kind === 'word' ? prev.text : '');
+        else if (t.text === ')') owners.pop();
+        else if (t.text === ';' && !owners.length) { stmtFirst = null; lastTop = null; }
+        return;
+      }
+      if (t.kind === 'word') {
+        if (dk === 'tsql' && t.text === 'GO') { stmtFirst = null; lastTop = null; return; }
+        if (stmtFirst === null) stmtFirst = t.text;
+        if (!owners.length && STMT_WORDS.has(t.text)) lastTop = t.text;
+        return;
+      }
+      if (t.kind !== 'str') return;
+      const owner = owners[owners.length - 1];
+      t.reason =
+        isStr(prev) || isStr(next) ? 'adjacent literals' :
+        lastTop === 'EXEC' || lastTop === 'EXECUTE' || lastTop === 'THROW' ? lastTop + ' argument' :
+        (dk === 'pg' || dk === 'spark') && stmtFirst === 'SET' ? 'SET statement' :
+        owner && LITERAL_ONLY_PARENS.has(owner) ? 'inside ' + owner + ' (…)' :
+        prev && prev.kind === 'word' && !EXPR_WORDS.has(prev.text) ? 'literal-only position after ' + prev.text : '';
+      t.wrap = !(safePrev(k) && safeNext(next));
+    });
+  }
+
+  // o: { t, keepLines, rawEol }
+  function rewriteScript(src, dk, o) {
+    const d = DIALECTS[dk];
+    const toks = lexScript(src, dk, o.rawEol);
+    planScript(toks, dk);
+    let out = '', last = 0, rewritten = 0, skipped = 0;
+    const hl = [], checks = [], quotesRead = [], quotesLeft = [];
+    toks.forEach(t => {
+      if (t.kind !== 'str') return;
+      // Spark: '' is read as a quote and written as CHR(39), the reading every author means
+      if (t.doubledAt >= 0) (t.reason ? quotesLeft : quotesRead).push(lineColOf(src, t.doubledAt).join(':'));
+      if (!markValue(t.value, d, o).mark.some(Boolean)) { t.state = 'plain'; return; }
+      if (t.reason) { t.state = 'skipped'; skipped++; return; }
+      out += src.slice(last, t.start);
+      const lineStart = src.lastIndexOf('\n', t.start - 1) + 1;
+      const r = encodeValue(t.value, dk, Object.assign({}, o, {
+        wrap: t.wrap,
+        indent: /^[ \t]*/.exec(src.slice(lineStart, t.start))[0],
+        startCol: out.length - (out.lastIndexOf('\n') + 1),
+      }));
+      r.hl.forEach(h => hl.push([out.length + h[0], out.length + h[1]]));
+      checks.push({ expr: r.text, value: t.value });
+      out += r.text;
+      last = t.end;
+      rewritten++;
+      t.state = 'rewritten';
+    });
+    out += src.slice(last);
+    const at = list => list.slice(0, 3).join(', ') + (list.length > 3 ? ', …' : '');
+    const notes = [];
+    if (quotesRead.length) notes.push("Note: '' read as a quote at " + at(quotesRead) + ' (Databricks and Spark 3.5 would have dropped it).');
+    if (quotesLeft.length) notes.push("Note: '' left as is at " + at(quotesLeft) + " (literal left alone); Databricks and Spark 3.5 drop it, so write \\' there.");
+    return { text: out, hl, rewritten, skipped, toks, checks, notes, quotesRead: quotesRead.length };
+  }
+
+  // ---- found characters ----
+  // [name, label shown instead of the character when it is invisible]
+  const NAMES = {
+    0x00: ['null', 'NUL'], 0x09: ['tab', 'TAB'], 0x0A: ['line feed', 'LF'], 0x0D: ['carriage return', 'CR'],
+    0x7F: ['delete', 'DEL'], 0x23: ['number sign'], 0x24: ['dollar sign'], 0x26: ['ampersand'],
+    0x27: ['apostrophe'], 0x5C: ['backslash'],
+    0xA0: ['no-break space', 'NBSP'], 0xA3: ['pound sign'], 0xA7: ['section sign'], 0xA9: ['copyright sign'],
+    0xAB: ['left double angle quote'], 0xAD: ['soft hyphen', 'SHY'], 0xAE: ['registered sign'],
+    0xB0: ['degree sign'], 0xB1: ['plus-minus sign'], 0xB7: ['middle dot'], 0xBB: ['right double angle quote'],
+    0xD7: ['multiplication sign'], 0xF7: ['division sign'],
+    0x2007: ['figure space', 'FSP'], 0x2009: ['thin space', 'THSP'], 0x200A: ['hair space', 'HSP'],
+    0x200B: ['zero-width space', 'ZWSP'], 0x200C: ['zero-width non-joiner', 'ZWNJ'],
+    0x200D: ['zero-width joiner', 'ZWJ'], 0x200E: ['left-to-right mark', 'LRM'], 0x200F: ['right-to-left mark', 'RLM'],
+    0x2011: ['non-breaking hyphen'], 0x2013: ['en dash'], 0x2014: ['em dash'],
+    0x2018: ['left single quote'], 0x2019: ['right single quote'], 0x201C: ['left double quote'],
+    0x201D: ['right double quote'], 0x201E: ['double low-9 quote'], 0x2022: ['bullet'], 0x2026: ['ellipsis'],
+    0x2028: ['line separator', 'LS'], 0x2029: ['paragraph separator', 'PS'],
+    0x202F: ['narrow no-break space', 'NNBSP'], 0x2030: ['per mille sign'], 0x2060: ['word joiner', 'WJ'],
+    0x20AC: ['euro sign'], 0x2116: ['numero sign'], 0x2122: ['trade mark sign'], 0x2190: ['leftwards arrow'],
+    0x2192: ['rightwards arrow'], 0x2212: ['minus sign'], 0x2260: ['not equal to'],
+    0x2264: ['less-than or equal to'], 0x2265: ['greater-than or equal to'], 0x2713: ['check mark'],
+    0x2717: ['ballot x'], 0xFEFF: ['byte-order mark', 'BOM'], 0xFFFD: ['replacement character'],
+  };
+  const SCRIPTS = ['Latin', 'Cyrillic', 'Greek', 'Armenian', 'Georgian', 'Hebrew', 'Arabic', 'Devanagari',
+    'Thai', 'Hangul', 'Hiragana', 'Katakana', 'Han'].map(s => [s, new RegExp('\\p{Script=' + s + '}', 'u')]);
+
+  function charName(cp) {
+    if (NAMES[cp]) return NAMES[cp][0];
+    const c = String.fromCodePoint(cp);
+    if (/\p{Extended_Pictographic}/u.test(c)) return 'emoji';
+    if (/\p{L}/u.test(c)) { const s = SCRIPTS.find(x => x[1].test(c)); return s ? s[0] + ' letter' : 'letter'; }
+    if (/\p{M}/u.test(c)) return 'combining mark';
+    if (/\p{Cf}/u.test(c)) return 'invisible format character';
+    if (/\p{Z}/u.test(c)) return 'space';
+    if (/\p{Cc}/u.test(c)) return 'control character';
+    if (/\p{N}/u.test(c)) return 'number';
+    if (/\p{Sc}/u.test(c)) return 'currency symbol';
+    if (/\p{P}/u.test(c)) return 'punctuation';
+    if (/\p{S}/u.test(c)) return 'symbol';
+    return 'character';
+  }
+  function charLabel(cp) {
+    if (NAMES[cp] && NAMES[cp][1]) return '[' + NAMES[cp][1] + ']';
+    const c = String.fromCodePoint(cp);
+    if (/\p{M}/u.test(c)) return '\u25CC' + c;
+    if (/\p{Cc}/u.test(c)) return '[CTRL]';
+    if (/\p{Cf}/u.test(c)) return '[FORMAT]';
+    if (/\p{Z}/u.test(c)) return '[SPACE]';
+    return c;
+  }
+
+  // One line per distinct target character, in order of first appearance. In script mode,
+  // occurrences that stay unencoded are marked * and their reasons listed at the end.
+  function buildReport(src, dk, o, toks, notes) {
+    const entries = new Map(), reasons = new Map();
+    let k = 0, line = 1, col = 1, offset = 0;
+    for (const ch of src) {
+      const cp = ch.codePointAt(0);
+      while (toks && k < toks.length && toks[k].end <= offset) k++;
+      const tok = toks && toks[k] && toks[k].start <= offset ? toks[k] : null;
+      const inQuotes = tok && (tok.kind === 'str' || tok.kind === 'special');
+      const skipWs = toks && (cp === 9 || cp === 10 || cp === 13) && !inQuotes;
+      if (isTarget(cp, o.t) && !skipWs) {
+        const reason = !toks ? '' :
+          !tok ? 'outside literals' :
+          tok.kind === 'comment' ? 'comment' :
+          tok.kind === 'ident' ? 'quoted identifier' :
+          tok.kind === 'special' ? tok.reason :
+          tok.kind !== 'str' ? 'outside literals' :
+          tok.state === 'rewritten' ? '' :
+          tok.state === 'skipped' ? tok.reason : 'not part of the value';
+        let e = entries.get(cp);
+        if (!e) { e = { cp, count: 0, pos: [], star: false }; entries.set(cp, e); }
+        e.count++;
+        if (reason) { e.star = true; reasons.set(reason, (reasons.get(reason) || 0) + 1); }
+        if (e.pos.length < 3) e.pos.push(line + ':' + col + (reason ? '*' : ''));
+      }
+      if (cp === 10) { line++; col = 1; } else col++;
+      offset += ch.length;
+    }
+    const rows = Array.from(entries.values()).map(e => {
+      let form;
+      try {
+        const v = cpsOf(String.fromCodePoint(e.cp)).map(c => c === 10 ? o.rawEol : String.fromCodePoint(c)).join('');
+        form = encodeValue(v, dk, { t: o.t, forceAll: true }).text;
+      } catch (err) { form = '(' + err.message + ')'; }
+      return ['U+' + hex4(e.cp), charLabel(e.cp), charName(e.cp), e.count + '\u00D7', e.pos.join(' '), form];
+    });
+    const widths = [0, 1, 2, 3, 4].map(c => Math.max(0, ...rows.map(r => Array.from(r[c]).length)));
+    const lines = rows.map(r => r.map((cell, c) => c < 5 ? cell + ' '.repeat(widths[c] - Array.from(cell).length) : cell).join('  '));
+    if (reasons.size) {
+      lines.push('', '* not encoded: ' + Array.from(reasons, ([r, n]) => r + ' (' + n + ')').join(', '));
+    }
+    (notes || []).forEach(n => { if (lines.length) lines.push(''); lines.push(n); });
+    return {
+      text: lines.join('\n'),
+      distinct: entries.size,
+      starred: Array.from(entries.values()).filter(e => e.star).length,
+    };
+  }
+
+  // Runs the whole pipeline; throws with a user-facing message on any error.
+  // o: { dialect, mode: 's' | 'v', t, keepLines, crlf }
+  function run(src, o) {
+    const dk = o.dialect;
+    const opts = { t: o.t, keepLines: o.keepLines, rawEol: o.t.lineBreaks && o.crlf ? '\r\n' : '\n' };
+    let res;
+    if (o.mode === 'v') {
+      const value = src.replace(/\n/g, opts.rawEol);
+      const r = encodeValue(value, dk, opts);
+      res = { text: r.text, hl: r.hl, encoded: r.encoded, toks: null, checks: [{ expr: r.text, value }] };
+    } else {
+      res = rewriteScript(src, dk, opts);
+    }
+    res.checks.forEach(c => {
+      if (evaluate(c.expr, dk) !== c.value) throw new Error('self-check failed: the output does not decode to the input');
+    });
+    res.report = buildReport(src, dk, opts, res.toks, res.notes);
+    return res;
+  }
+  // ---- end core ----
+
+  const $ = id => document.getElementById(id);
+  const input = $('input'), output = $('output'), back = $('outBack'), report = $('report');
+  const dialect = $('dialect'), mode = $('mode'), eol = $('eol'), also = $('also'), keepLines = $('keepLines');
+  const tNonAscii = $('tNonAscii'), tLines = $('tLines'), tCtrl = $('tCtrl'), tAmp = $('tAmp'), tDollar = $('tDollar');
+  const inStatus = $('inStatus'), outStatus = $('outStatus'), repStatus = $('repStatus');
+  const checks = [tNonAscii, tLines, tCtrl, tAmp, tDollar, keepLines];
+
+  setupCopyButton($('copyOut'), output);
+  setupCopyButton($('copyRep'), report);
+
+  const MODE_NOTES = {
+    s: 'only string literals are rewritten; existing literals are read with default escape settings',
+    v: 'the whole input is one value and becomes one expression',
+  };
+
+  // ---- URL hash state config ----
+  function syncHash() {
+    writeHashParams({
+      d: dialect.value !== 'spark' ? dialect.value : '',
+      m: mode.value !== 's' ? mode.value : '',
+      na: tNonAscii.checked ? '' : '0',
+      lb: tLines.checked ? '' : '0',
+      eol: eol.value !== 'lf' ? eol.value : '',
+      cc: tCtrl.checked ? '' : '0',
+      amp: tAmp.checked ? '1' : '',
+      dol: tDollar.checked ? '' : '0',
+      x: also.value,
+      kl: keepLines.checked ? '' : '0',
+    });
+  }
+  function loadHash() {
+    const p = readHashParams();
+    if (DIALECTS[p.get('d')]) dialect.value = p.get('d');
+    if (p.get('m') === 'v') mode.value = 'v';
+    if (p.get('na') === '0') tNonAscii.checked = false;
+    if (p.get('lb') === '0') tLines.checked = false;
+    if (p.get('eol') === 'crlf') eol.value = 'crlf';
+    if (p.get('cc') === '0') tCtrl.checked = false;
+    if (p.get('amp') === '1') tAmp.checked = true;
+    if (p.get('dol') === '0') tDollar.checked = false;
+    if (p.get('x')) also.value = p.get('x');
+    if (p.get('kl') === '0') keepLines.checked = false;
+  }
+  const debouncedSync   = makeDebounced(syncHash);
+  const debouncedUpdate = makeDebounced(update, 150);
+
+  // ---- highlight layer ----
+  // A copy of the output behind the transparent textarea, with the encoded parts in
+  // <mark>. Built from text nodes only; user text is never parsed as HTML.
+  function paintHighlights(text, ranges) {
+    back.textContent = '';
+    let last = 0;
+    ranges.forEach(([a, b]) => {
+      back.appendChild(document.createTextNode(text.slice(last, a)));
+      const m = document.createElement('mark');
+      m.textContent = text.slice(a, b);
+      back.appendChild(m);
+      last = b;
+    });
+    back.appendChild(document.createTextNode(text.slice(last) + '\n'));
+    syncBack();
+  }
+  function syncBack() {
+    back.style.width = output.clientWidth + 'px';
+    back.style.height = output.clientHeight + 'px';
+    back.scrollTop = output.scrollTop;
+    back.scrollLeft = output.scrollLeft;
+  }
+  output.addEventListener('scroll', syncBack);
+  if (window.ResizeObserver) new ResizeObserver(syncBack).observe(output);
+
+  function update() {
+    const src = input.value;
+    inStatus.textContent = src.length + ' chars';
+    $('dialectNote').textContent = DIALECTS[dialect.value].note;
+    $('modeNote').textContent = MODE_NOTES[mode.value];
+    eol.disabled = !tLines.checked;
+    if (!src) {
+      output.value = ''; report.value = '';
+      outStatus.textContent = ''; repStatus.textContent = '';
+      paintHighlights('', []);
+      return;
+    }
+    let res;
+    try {
+      res = run(src, {
+        dialect: dialect.value, mode: mode.value, keepLines: keepLines.checked, crlf: eol.value === 'crlf',
+        t: {
+          nonAscii: tNonAscii.checked, lineBreaks: tLines.checked, controls: tCtrl.checked,
+          amp: tAmp.checked, dollar: tDollar.checked, also: new Set(cpsOf(also.value)),
+        },
+      });
+    } catch (e) {
+      output.value = ''; report.value = '';
+      outStatus.textContent = 'Error: ' + e.message; repStatus.textContent = '';
+      paintHighlights('', []);
+      return;
+    }
+    output.value = res.text;
+    paintHighlights(res.text, res.hl);
+    outStatus.textContent = mode.value === 'v'
+      ? pluralLabel(res.encoded, 'character') + ' encoded'
+      : pluralLabel(res.rewritten, 'literal') + ' rewritten' + (res.skipped ? ' \u00B7 ' + res.skipped + ' left alone' : '') +
+        (res.quotesRead ? ' \u00B7 ' + res.quotesRead + " '' read as a quote" : '');
+    report.value = res.report.text;
+    repStatus.textContent = pluralLabel(res.report.distinct, 'character') +
+      (res.report.starred ? ' \u00B7 ' + res.report.starred + ' not encoded' : '');
+  }
+
+  input.addEventListener('input', () => { debouncedUpdate(); });
+  also.addEventListener('input', () => { debouncedUpdate(); debouncedSync(); });
+  [dialect, mode, eol].concat(checks).forEach(el => el.addEventListener('change', () => {
+    update();
+    debouncedSync();
+  }));
+
+  $('clearIn').addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+  $('resetBtn').addEventListener('click', () => {
+    dialect.value = 'spark'; mode.value = 's'; eol.value = 'lf'; also.value = '';
+    [tNonAscii, tLines, tCtrl, tDollar, keepLines].forEach(c => { c.checked = true; });
+    tAmp.checked = false;
+    update();
+    syncHash();
+  });
+
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>

@@ -30,6 +30,8 @@
   --disabled-fg:  #999;
 
   --focus:        #444;
+
+  --mark:         #cce5ff;   /* sqlchar output highlight */
 }
 
 /* ---------- DARK --------------------- */
@@ -64,6 +66,8 @@ html[data-theme="dark"] {
   --disabled-fg:  #6e7681;
 
   --focus:        #1f6feb;
+
+  --mark:         rgba(121, 192, 255, .30);
 }
 
 /* ------------------------------- */
@@ -321,6 +325,26 @@ select:focus { border-color: var(--focus); }
 .check { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; }
 .check input { margin-top: 2px; accent-color: var(--accent); }
 .check small { display: block; color: var(--text-4); font-size: 11px; }
+
+/* sqlchar: highlight layer behind the output textarea.
+   Built with text nodes only; user text is never parsed as HTML. */
+.hl-wrap { position: relative; flex: 1; display: flex; min-height: 0; }
+.hl-wrap textarea { position: relative; z-index: 1; background: transparent; }
+.hl-back {
+  position: absolute; top: 0; left: 0;
+  overflow: hidden; pointer-events: none;
+  padding: 10px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: break-word;
+  color: transparent;
+}
+.hl-back mark { background: var(--mark); color: transparent; }
+.dialect-note { display: block; color: var(--text-4); font-size: 11px; margin-top: 6px; }
+.check-row { display: flex; align-items: flex-start; gap: 8px; }
+.check-row select { font-size: 12px; padding: 1px 4px; }
+.check-row input[type=text] { flex: 1; min-width: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.also-label { font-size: 13px; padding-top: 4px; white-space: nowrap; }
 
 /* index landing */
 .tool-list {

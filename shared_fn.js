@@ -23,6 +23,8 @@ const TOOLS = [
     description: 'Format, minify, or sort keys in JSON' },
   { file: 'template.html', label: 'template',
     description: 'Render a pattern once per input row' },
+  { file: 'sqlchar.html', label: 'sqlchar',
+    description: 'Rewrite special characters in SQL literals as CHAR()/CHR() calls' },
 ];
 
 // ---------- Theme toggle----------
