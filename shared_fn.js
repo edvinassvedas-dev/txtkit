@@ -103,13 +103,14 @@ renderToolCards();
 
 // ---------- Separator def ----------
 const SEPARATORS = {
-  newline:       { split: /\r?\n/,    join: '\n' },
-  comma:         { split: ',',         join: ',' },
-  'comma-space': { split: /,\s*/,      join: ', ' },
-  semicolon:     { split: /;\s*/,      join: '; ' },
-  space:         { split: /\s+/,       join: ' ' },
-  tab:           { split: '\t',        join: '\t' },
-  pipe:          { split: /\s*\|\s*/,  join: ' | ' },
+  newline:         { split: /\r?\n/,    join: '\n' },
+  comma:           { split: ',',         join: ',' },
+  'comma-space':   { split: /,\s*/,      join: ', ' },
+  'comma-newline': { split: /,\r?\n/,   join: ',\n' },
+  semicolon:       { split: /;\s*/,      join: '; ' },
+  space:           { split: /\s+/,       join: ' ' },
+  tab:             { split: '\t',        join: '\t' },
+  pipe:            { split: /\s*\|\s*/,  join: ' | ' },
 };
 
 function getSplitter(kind, custom) {
